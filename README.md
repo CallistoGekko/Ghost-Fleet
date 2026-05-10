@@ -60,23 +60,6 @@ Requests that cannot be fulfilled stay `pending` and retry each day.
 - **BepInEx 5.x** (x64)
 - **Newtonsoft.Json** (included with the game)
 
-## Building from Source
-
-```powershell
-dotnet build "C:\temp\logiModDevRoot\NewVersion\LogisticsMod\LogisticsMod.csproj" -c Debug
-```
-
-The built DLL is placed directly into the game's BepInEx plugins folder (configured in `.csproj`).
-
-### Dependencies
-Update the `.csproj` hint paths to match your game installation:
-- `BepInEx/core/BepInEx.dll`
-- `BepInEx/core/0Harmony.dll`
-- `Solar Expanse_Data/Managed/Assembly-CSharp.dll`
-- `Solar Expanse_Data/Managed/UnityEngine.CoreModule.dll`
-- `Solar Expanse_Data/Managed/Unity.TextMeshPro.dll`
-- (and other UnityEngine modules, listed in `.csproj`)
-
 ## Architecture
 
 ```
@@ -107,7 +90,3 @@ LogisticsPersistence (static)
 - **Fuel-based spacecraft** — requires fuel at the target object for the return trip to the home object.
 - **Due to the two issues above, solar sail spacecraft work best.**
 - **Magnetic rails** — not yet tested. Will be added later.
-
-## License
-
-MIT
