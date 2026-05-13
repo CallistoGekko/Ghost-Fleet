@@ -3,8 +3,8 @@ using HarmonyLib;
 using CustomUpdate;
 using Game.Info;
 using Game.UI.Windows.Elements.PlanMissionElements;
+using Game.UI.Windows.Windows;
 using Manager;
-using LogisticsMod.Logic;
 
 namespace LogisticsMod.Patches;
 
@@ -14,14 +14,21 @@ internal static class SpaceCraftCyclicalMissionControllerPatches
     internal static Dictionary<string, double> LogiLoadLimit = new Dictionary<string, double>();
     private static bool _reapplyingLoadLimit = false;
 
-    internal static void SetLogiLoadLimit(string missionName, double limit)
+    internal static void SetLogiLoadLimit(string loadLimitKey, double limit)
     {
-        LogiLoadLimit[missionName] = limit;
+        LogiLoadLimit[loadLimitKey] = limit;
     }
 
-    internal static void ClearLogiLoadLimit(string missionName)
+    internal static void ClearLogiLoadLimit(string loadLimitKey)
     {
-        LogiLoadLimit.Remove(missionName);
+        LogiLoadLimit.Remove(loadLimitKey);
+    }
+
+    private static string GetLogiLoadLimitKey(CycleMissionsData cmd)
+    {
+        var rd = (cmd.cargoAllStart?.Tab != null && cmd.cargoAllStart.Tab.Length > 0)
+            ? cmd.cargoAllStart.Tab[0] : null;
+        return cmd.customNameFromPlanMission + "_" + (rd?.Name ?? "");
     }
 
     [HarmonyPatch(typeof(SpaceCraftCyclicalMissionController), nameof(SpaceCraftCyclicalMissionController.TryPlanCycleMission))]
@@ -33,26 +40,22 @@ internal static class SpaceCraftCyclicalMissionControllerPatches
 
         if (cmd.customNameFromPlanMission.StartsWith("[LOGI]"))
         {
-            LogisticsObserver.Log($"TryPlanCycleMission[LOGI]: name=\"{cmd.customNameFromPlanMission}\" loadLimit2={loadLimit2?.ToString() ?? "null"} flyWas={__instance.CycleMissionPlanFlyWas}");
-
             if (__instance.CycleMissionPlanFlyWas)
-            {
                 return false;
-            }
 
-            if (loadLimit2 == null && LogiLoadLimit.TryGetValue(cmd.customNameFromPlanMission, out var storedLimit) && !_reapplyingLoadLimit)
+            if (loadLimit2 == null && !_reapplyingLoadLimit)
             {
-                if (cmd.CheckComplete())
+                var key = GetLogiLoadLimitKey(cmd);
+                if (LogiLoadLimit.TryGetValue(key, out var storedLimit))
                 {
-                    LogisticsObserver.Log($"TryPlanCycleMission[LOGI]: cycle already complete, skipping reapply");
+                    if (cmd.CheckComplete())
+                        return false;
+
+                    _reapplyingLoadLimit = true;
+                    __instance.TryPlanCycleMission(loadLimit2: storedLimit);
+                    _reapplyingLoadLimit = false;
                     return false;
                 }
-
-                _reapplyingLoadLimit = true;
-                LogisticsObserver.Log($"TryPlanCycleMission[LOGI]: reapplying stored loadLimit2={storedLimit}");
-                __instance.TryPlanCycleMission(loadLimit2: storedLimit);
-                _reapplyingLoadLimit = false;
-                return false;
             }
         }
         return true;
@@ -72,7 +75,10 @@ internal static class SpaceCraftCyclicalMissionControllerPatches
             foreach (var sci in cmd.ListSC)
             {
                 if (sci is Spacecraft sc)
+                {
                     cm.RemoveCycleMission(sc);
+                    ClearLogiLoadLimit(GetLogiLoadLimitKey(cmd));
+                }
             }
         }
 
@@ -87,13 +93,76 @@ internal static class SpaceCraftCyclicalMissionControllerPatches
                     foreach (var req in reqData.requests)
                     {
                         if (req.ResourceDefinition == res && req.status == Data.LogisticsRequestStatus.InProgress)
-                        {
-                            LogisticsObserver.Log($"CLEANUP: {res.ID} to {requester.ObjectName} — mission not feasible");
                             req.status = Data.LogisticsRequestStatus.Pending;
-                        }
                     }
                 }
             }
+        }
+    }
+
+    [HarmonyPatch(typeof(PMTabSchedule), nameof(PMTabSchedule.OnClickScheduleButtonForCode))]
+    [HarmonyPostfix]
+    private static void OnClickScheduleButtonForCodePostfix(PMTabSchedule __instance, ref MissionInfo __result)
+    {
+        if (__result != null)
+        {
+            string restoredName = null;
+
+            // For cyclical missions: restore [LOGI] name from CycleMissionsData.customNameFromPlanMission
+            // (game overwrites it to "Cyclical missions N" in TryPlanCycleMission)
+            if (__result.spacecraftInfo2 is Spacecraft sc)
+            {
+                var cmd = MonoBehaviourSingleton<CycleMissionManager>.Instance?.GetCycleMission(sc);
+                if (cmd?.customNameFromPlanMission.StartsWith("[LOGI]") == true)
+                {
+                    __result.missionName = cmd.customNameFromPlanMission;
+                    __result.fromCyclicalMission = true;
+                    restoredName = cmd.customNameFromPlanMission;
+                    Logic.LogisticsObserver.Log($"[SCP] restored LOGI name: \"{restoredName}\"");
+                }
+            }
+
+            // For one-shot catapult missions: ensure fromCyclicalMission flag is set
+            if (restoredName == null && __result.missionName.StartsWith("[LOGI]"))
+            {
+                __result.fromCyclicalMission = true;
+                Logic.LogisticsObserver.Log($"[SCP] set fromCyclicalMission=true for LOGI mission \"{__result.missionName}\"");
+            }
+
+            Logic.LogisticsObserver.Log($"[SCP] mission created ID={__result.id} name=\"{__result.missionName}\"");
+        }
+        else
+            Logic.LogisticsObserver.Log($"[SCP] FAILED — returned null");
+    }
+
+    // Protect [LOGI] mission names from auto-generation in ChangeMissionName()
+    // Game overwrites to "Destination N" when stage changes to Schedule
+    [HarmonyPatch(typeof(PMTabDestination), nameof(PMTabDestination.ChangeMissionName), new System.Type[] { })]
+    [HarmonyPrefix]
+    private static bool ChangeMissionNamePrefix(PMTabDestination __instance)
+    {
+        var pmw = HarmonyLib.Traverse.Create(__instance).Field("planMissionWindow").GetValue<PlanMissionWindow>();
+        if (pmw?.MissionInfo?.missionName?.StartsWith("[LOGI]") == true)
+        {
+            return false;
+        }
+        return true;
+    }
+
+    // Restore [LOGI] name before CreateMissionInfo (safety net if ChangeMissionName bypassed)
+    [HarmonyPatch(typeof(PMTabSchedule), "CreateFly")]
+    [HarmonyPrefix]
+    private static void CreateFlyPrefix(PMTabSchedule __instance)
+    {
+        var pmw = Traverse.Create(__instance).Field("planMissionWindow").GetValue<PlanMissionWindow>();
+        var ppm = pmw?.PMMissionParameter;
+        if (ppm == null) return;
+
+        var logiName = ppm.MissionName;
+        if (!string.IsNullOrEmpty(logiName) && logiName.StartsWith("[LOGI]"))
+        {
+            ppm.ChangeMissionName(logiName, _manualChangeName: true);
+            Logic.LogisticsObserver.Log($"[SCP] CreateFly: restored LOGI name \"{logiName}\"");
         }
     }
 }

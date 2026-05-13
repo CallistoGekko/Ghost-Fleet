@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using Game.Info;
-using LogisticsMod.Logic;
 using Manager;
 using ScriptableObjectScripts;
 using UnityEngine;
@@ -71,10 +70,7 @@ public static class LogisticsPersistence
                     .Where(oi => oi == null || !allObjectInfos.Contains(oi))
                     .ToList();
                 foreach (var deadOi in deadKeys)
-                {
-                    LogisticsObserver.Log($"Save: removing stale data for object id={deadOi?.id ?? -1}");
                     LogisticsNetwork.RemoveObject(deadOi);
-                }
             }
 
             var data = new SaveData();
@@ -117,11 +113,9 @@ public static class LogisticsPersistence
 
             var json = JsonConvert.SerializeObject(data, Formatting.Indented);
             File.WriteAllText(GetPath(saveName), json);
-            LogisticsObserver.Log($"Saved to {saveName}");
         }
-        catch (Exception ex)
+        catch (Exception)
         {
-            LogisticsObserver.LogError($"Save error: {ex}");
         }
     }
 
@@ -131,10 +125,7 @@ public static class LogisticsPersistence
         {
             var path = GetPath(saveName);
             if (!File.Exists(path))
-            {
-                LogisticsObserver.Log($"No save for {saveName}");
                 return;
-            }
 
             var json = File.ReadAllText(path);
             var data = JsonConvert.DeserializeObject<SaveData>(json);
@@ -149,10 +140,7 @@ public static class LogisticsPersistence
             {
                 var oi = objManager?.GetByID(so.objectId);
                 if (oi == null)
-                {
-                    LogisticsObserver.LogWarning($"Load: object id={so.objectId} not found, skipping");
                     continue;
-                }
 
                 var ld = LogisticsNetwork.GetOrCreate(oi);
 
@@ -186,12 +174,9 @@ public static class LogisticsPersistence
                 foreach (var sq in so.launchVehicleQuota)
                     ld.launchVehicleQuota.Add(new ShipQuotaEntry { typeName = sq.typeName, count = sq.count });
             }
-
-            LogisticsObserver.Log($"Loaded from {saveName}");
         }
-        catch (Exception ex)
+        catch (Exception)
         {
-            LogisticsObserver.LogError($"Load error: {ex}");
         }
     }
 }
