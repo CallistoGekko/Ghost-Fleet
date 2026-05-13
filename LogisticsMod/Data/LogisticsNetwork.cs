@@ -4,6 +4,7 @@ using CustomUpdate;
 using Game;
 using Game.Info;
 using Game.ObjectInfoDataScripts;
+using LogisticsMod.Logic;
 using Manager;
 using ScriptableObjectScripts;
 using UnityEngine;
@@ -22,11 +23,11 @@ public static class LogisticsNetwork
         {
             data = new LogisticsObjectData { ObjectInfo = oi, objectInfoSaveId = oi.id.ToString() };
             _dataByObject[oi.id] = data;
+            LogisticsObserver.Log($"NETWORK add object: id={oi.id} name=\"{oi.ObjectName}\"");
         }
-        else
+        else if (data.ObjectInfo == null)
         {
-            if (data.ObjectInfo == null)
-                data.ObjectInfo = oi;
+            data.ObjectInfo = oi;
         }
         return data;
     }
@@ -40,15 +41,25 @@ public static class LogisticsNetwork
 
     public static LogisticsRequest AddRequest(ObjectInfo oi, ResourceDefinition rd, double amount)
     {
+        return AddRequest(oi, rd, amount, amount, false);
+    }
+
+    public static LogisticsRequest AddRequest(ObjectInfo oi, ResourceDefinition rd, double targetAmount,
+        double minimumAmount, bool useMinimumAmount)
+    {
         var data = GetOrCreate(oi);
+        minimumAmount = System.Math.Max(0, System.Math.Min(minimumAmount, targetAmount));
         var req = new LogisticsRequest
         {
             resourceDef = rd,
             ResourceDefinition = rd,
-            requestedAmount = amount,
+            requestedAmount = targetAmount,
+            minimumAmount = minimumAmount,
+            useMinimumAmount = useMinimumAmount,
             status = LogisticsRequestStatus.Pending
         };
         data.requests.Add(req);
+        LogisticsObserver.Log($"Added request: {rd.ID} target={targetAmount} minimum={(useMinimumAmount ? minimumAmount : targetAmount)} on {oi.ObjectName}");
         return req;
     }
 
@@ -63,6 +74,7 @@ public static class LogisticsNetwork
             isActive = true
         };
         data.providers.Add(prov);
+        LogisticsObserver.Log($"Added provider: {rd.ID} min={minimumKeep} on {oi.ObjectName}");
         return prov;
     }
 
@@ -88,7 +100,9 @@ public static class LogisticsNetwork
 
     public static int GetQuota(ObjectInfo oi, string typeName, bool isSpacecraft)
     {
-        var quotas = GetQuotas(oi, isSpacecraft);
+        var data = Get(oi);
+        if (data == null) return 0;
+        var quotas = isSpacecraft ? data.spacecraftQuota : data.launchVehicleQuota;
         var entry = quotas.Find(q => q.typeName == typeName);
         return entry?.count ?? 0;
     }
@@ -105,19 +119,26 @@ public static class LogisticsNetwork
 
     public static void RemoveQuota(ObjectInfo oi, string typeName, bool isSpacecraft)
     {
-        var quotas = GetQuotas(oi, isSpacecraft);
+        var data = Get(oi);
+        if (data == null) return;
+        var quotas = isSpacecraft ? data.spacecraftQuota : data.launchVehicleQuota;
         quotas.RemoveAll(q => q.typeName == typeName);
     }
 
     public static void ClearAll()
     {
+        var count = _dataByObject.Count;
         _dataByObject.Clear();
+        LogisticsObserver.Log($"DIAG ClearAll: cleared {count} entries");
     }
 
     public static void RemoveObject(ObjectInfo oi)
     {
         if (oi != null)
+        {
+            LogisticsObserver.Log($"DIAG RemoveObject: id={oi.id} name=\"{oi.ObjectName}\"");
             _dataByObject.Remove(oi.id);
+        }
     }
 
     public static List<ObjectInfo> GetAllObjects()
@@ -132,6 +153,8 @@ public static class LogisticsNetwork
                 oi = objManager.GetByID(kv.Key);
                 if (oi != null)
                     kv.Value.ObjectInfo = oi;
+                else
+                    LogisticsObserver.LogWarning($"DIAG GetAllObjects: id={kv.Key} could NOT resolve via objManager");
             }
             if (oi != null)
                 result.Add(oi);
@@ -158,10 +181,12 @@ public static class LogisticsNetwork
         return result;
     }
 
-    public static Dictionary<string, int> GetShipTypeCountsOnObject(ObjectInfo oi, bool isSpacecraft, Company player)
+    public static Dictionary<string, int> GetShipTypeCountsOnObject(ObjectInfo oi, bool isSpacecraft)
     {
         var result = new Dictionary<string, int>();
-        if (oi == null || player == null) return result;
+        if (oi == null) return result;
+        var player = MonoBehaviourSingleton<GameManager>.Instance?.Player;
+        if (player == null) return result;
 
         if (isSpacecraft)
         {
@@ -169,7 +194,6 @@ public static class LogisticsNetwork
             {
                 if (sc == null || sc.spacecraftType == null) continue;
                 if (sc.GetCompany() != player) continue;
-                if (sc.spacecraftType.MagneticCatapult) continue;
                 if (sc.CurrentlyOnThisObject != oi) continue;
                 var tn = TypeKey(sc.spacecraftType.ID, sc.spacecraftType.NameRocketType ?? "SC");
                 if (!result.ContainsKey(tn)) result[tn] = 0;
@@ -187,34 +211,6 @@ public static class LogisticsNetwork
                 var tn = TypeKey(lv.launchVehicleType.ID, lv.launchVehicleType.Name ?? "LV");
                 if (!result.ContainsKey(tn)) result[tn] = 0;
                 result[tn]++;
-            }
-        }
-        return result;
-    }
-
-
-
-    public static HashSet<ResourceDefinition> GetNetworkResourcesSet(Company player)
-    {
-        var result = new HashSet<ResourceDefinition>();
-        if (player == null) return result;
-
-        foreach (var oi in GetAllObjects())
-        {
-            var data = Get(oi);
-            if (data == null) continue;
-
-            var oid = oi.GetObjectInfoData(player);
-            if (oid == null) continue;
-
-            foreach (var prov in data.providers)
-            {
-                if (!prov.isActive) continue;
-                var rd = prov.ResourceDefinition;
-                if (rd == null) continue;
-
-                if (oid.CheckResources(rd) > prov.minimumKeep)
-                    result.Add(rd);
             }
         }
         return result;
@@ -246,4 +242,32 @@ public static class LogisticsNetwork
             result += legacy;
         return result;
     }
+
+    public static HashSet<ResourceDefinition> GetNetworkResourcesSet(Company player)
+    {
+        var result = new HashSet<ResourceDefinition>();
+        if (player == null) return result;
+
+        foreach (var oi in GetAllObjects())
+        {
+            var data = Get(oi);
+            if (data == null) continue;
+
+            var oid = oi.GetObjectInfoData(player);
+            if (oid == null) continue;
+
+            foreach (var prov in data.providers)
+            {
+                if (!prov.isActive) continue;
+                var rd = prov.ResourceDefinition;
+                if (rd == null) continue;
+
+                if (oid.CheckResources(rd) > prov.minimumKeep)
+                    result.Add(rd);
+            }
+        }
+        return result;
+    }
 }
+
+

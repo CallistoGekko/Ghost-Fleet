@@ -11,13 +11,26 @@ public class LogisticsRequest
 {
     public ResourceDefinitionIDSave resourceDef;
     public double requestedAmount;
+    public double minimumAmount;
+    public bool useMinimumAmount;
     public LogisticsRequestStatus status;
+    public RelayStage relayStage;
+    public int relaySourceObjectId = -1;
+    public int relayOrbitObjectId = -1;
+    public int relayFinalTargetObjectId = -1;
 
     [NonSerialized]
     public ResourceDefinition ResourceDefinition;
 
     [NonSerialized]
     public string statusNote;
+}
+
+public enum RelayStage
+{
+    None,
+    WaitingForSourceOrbitStock,
+    WaitingForFinalLeg
 }
 
 public enum LogisticsRequestStatus

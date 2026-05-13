@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using Game.Info;
+using LogisticsMod.Logic;
 using Manager;
 using ScriptableObjectScripts;
 using UnityEngine;
@@ -40,7 +41,13 @@ public static class LogisticsPersistence
     {
         public string resourceId;
         public double amount;
+        public double minimumAmount;
+        public bool useMinimumAmount;
         public int status;
+        public int relayStage;
+        public int relaySourceObjectId;
+        public int relayOrbitObjectId;
+        public int relayFinalTargetObjectId;
     }
 
     [Serializable]
@@ -70,7 +77,10 @@ public static class LogisticsPersistence
                     .Where(oi => oi == null || !allObjectInfos.Contains(oi))
                     .ToList();
                 foreach (var deadOi in deadKeys)
+                {
+                    LogisticsObserver.Log($"Save: removing stale data for object id={deadOi?.id ?? -1}");
                     LogisticsNetwork.RemoveObject(deadOi);
+                }
             }
 
             var data = new SaveData();
@@ -88,7 +98,13 @@ public static class LogisticsPersistence
                     {
                         resourceId = r.ResourceDefinition?.ID ?? r.resourceDef.id,
                         amount = r.requestedAmount,
-                        status = (int)r.status
+                        minimumAmount = r.minimumAmount,
+                        useMinimumAmount = r.useMinimumAmount,
+                        status = (int)r.status,
+                        relayStage = (int)r.relayStage,
+                        relaySourceObjectId = r.relaySourceObjectId,
+                        relayOrbitObjectId = r.relayOrbitObjectId,
+                        relayFinalTargetObjectId = r.relayFinalTargetObjectId
                     });
                 }
 
@@ -113,9 +129,11 @@ public static class LogisticsPersistence
 
             var json = JsonConvert.SerializeObject(data, Formatting.Indented);
             File.WriteAllText(GetPath(saveName), json);
+            LogisticsObserver.Log($"Saved to {saveName}");
         }
-        catch (Exception)
+        catch (Exception ex)
         {
+            LogisticsObserver.LogError($"Save error: {ex}");
         }
     }
 
@@ -123,15 +141,18 @@ public static class LogisticsPersistence
     {
         try
         {
+            LogisticsNetwork.ClearAll();
+
             var path = GetPath(saveName);
             if (!File.Exists(path))
+            {
+                LogisticsObserver.Log($"No save for {saveName}");
                 return;
+            }
 
             var json = File.ReadAllText(path);
             var data = JsonConvert.DeserializeObject<SaveData>(json);
             if (data == null || data.objects == null) return;
-
-            LogisticsNetwork.ClearAll();
 
             var allResources = SerializedMonoBehaviourSingleton<AllScriptableObjectManager>.Instance?.AllResourceDefinitions;
             var objManager = MonoBehaviourSingleton<ObjectInfoManager>.Instance;
@@ -140,7 +161,10 @@ public static class LogisticsPersistence
             {
                 var oi = objManager?.GetByID(so.objectId);
                 if (oi == null)
+                {
+                    LogisticsObserver.LogWarning($"Load: object id={so.objectId} not found, skipping");
                     continue;
+                }
 
                 var ld = LogisticsNetwork.GetOrCreate(oi);
 
@@ -152,7 +176,13 @@ public static class LogisticsPersistence
                         resourceDef = (ResourceDefinitionIDSave)rd,
                         ResourceDefinition = rd,
                         requestedAmount = sr.amount,
-                        status = (LogisticsRequestStatus)sr.status
+                        minimumAmount = sr.minimumAmount,
+                        useMinimumAmount = sr.useMinimumAmount,
+                        status = (LogisticsRequestStatus)sr.status,
+                        relayStage = (RelayStage)sr.relayStage,
+                        relaySourceObjectId = sr.relaySourceObjectId,
+                        relayOrbitObjectId = sr.relayOrbitObjectId,
+                        relayFinalTargetObjectId = sr.relayFinalTargetObjectId
                     });
                 }
 
@@ -174,9 +204,12 @@ public static class LogisticsPersistence
                 foreach (var sq in so.launchVehicleQuota)
                     ld.launchVehicleQuota.Add(new ShipQuotaEntry { typeName = sq.typeName, count = sq.count });
             }
+
+            LogisticsObserver.Log($"Loaded from {saveName}");
         }
-        catch (Exception)
+        catch (Exception ex)
         {
+            LogisticsObserver.LogError($"Load error: {ex}");
         }
     }
 }

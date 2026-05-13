@@ -79,7 +79,7 @@ public class LogisticsSection
         lineLayout.ignoreLayout = true;
         lineGo.GetComponent<Image>().color = _headerDividerColor;
 
-        var headerGo = new GameObject("Header", typeof(RectTransform), typeof(Image), typeof(Button), typeof(LayoutElement));
+        var headerGo = new GameObject("Header", typeof(RectTransform), typeof(Image), typeof(LayoutElement), typeof(HeaderHoverTint));
         headerGo.transform.SetParent(Root.transform, false);
         var headerRt = headerGo.GetComponent<RectTransform>();
         headerRt.anchorMin = new Vector2(0, 0);
@@ -92,25 +92,14 @@ public class LogisticsSection
 
         var headerImg = headerGo.GetComponent<Image>();
         headerImg.color = _headerColor;
-        var styleButtonImage = styleButton != null ? styleButton.GetComponent<Image>() : null;
-        if (styleButtonImage != null)
-        {
-            headerImg.sprite = styleButtonImage.sprite;
-            headerImg.type = styleButtonImage.type;
-            headerImg.material = styleButtonImage.material;
-            headerImg.preserveAspect = styleButtonImage.preserveAspect;
-            headerImg.raycastTarget = styleButtonImage.raycastTarget;
-        }
+        headerImg.raycastTarget = true;
 
-        var btn = headerGo.GetComponent<Button>();
-        btn.navigation = new Navigation { mode = Navigation.Mode.None };
-        btn.transition = Selectable.Transition.ColorTint;
-        btn.colors = _headerButtonColors ?? (styleButton != null ? styleButton.colors : new ColorBlock
+        var arrowColors = _headerButtonColors ?? (styleButton != null ? styleButton.colors : new ColorBlock
         {
-            normalColor = Color.white,
-            highlightedColor = new Color(1f, 1f, 1f, 0.72f),
-            pressedColor = new Color(0.78f, 0.78f, 0.78f, 1f),
-            selectedColor = Color.white,
+            normalColor = new Color(0.424f, 0.424f, 0.424f, 1f),
+            highlightedColor = new Color(0f, 1f, 0.914f, 1f),
+            pressedColor = new Color(0.424f, 0.424f, 0.424f, 1f),
+            selectedColor = new Color(0.424f, 0.424f, 0.424f, 1f),
             disabledColor = new Color(0.45f, 0.45f, 0.45f, 1f),
             colorMultiplier = 1f,
             fadeDuration = 0.08f
@@ -131,7 +120,7 @@ public class LogisticsSection
                 arrowRt.sizeDelta = donorRt.sizeDelta;
                 arrowRt.anchoredPosition = donorRt.anchoredPosition;
                 arrowRt.localScale = donorRt.localScale;
-                labelLeftOffset = 16f;
+                labelLeftOffset = donorRt.sizeDelta.x + donorRt.anchoredPosition.x + 8f;
             }
             else
             {
@@ -143,13 +132,11 @@ public class LogisticsSection
             }
 
             _arrowImage = arrowGo.GetComponent<Image>();
-            var headerColors = btn.colors;
-            _arrowImage.color = headerColors.normalColor;
+            _arrowImage.color = arrowColors.normalColor;
             _arrowImage.material = styleIcon.material;
             _arrowImage.type = styleIcon.type;
             _arrowImage.preserveAspect = styleIcon.preserveAspect;
-            _arrowImage.raycastTarget = styleIcon.raycastTarget;
-            btn.targetGraphic = _arrowImage;
+            _arrowImage.raycastTarget = false;
         }
         else
         {
@@ -164,9 +151,9 @@ public class LogisticsSection
             _arrowText = arrowGo.GetComponent<TextMeshProUGUI>();
             _arrowText.font = font;
             _arrowText.fontSize = 14;
-            _arrowText.color = _headerTextColor;
+            _arrowText.color = arrowColors.normalColor;
             _arrowText.alignment = TextAlignmentOptions.Center;
-            btn.targetGraphic = _arrowText;
+            _arrowText.raycastTarget = false;
         }
 
         var labelGo = new GameObject("Label", typeof(RectTransform), typeof(TextMeshProUGUI));
@@ -185,6 +172,7 @@ public class LogisticsSection
         labelTmp.fontStyle = FontStyles.Normal;
         labelTmp.alignment = TextAlignmentOptions.Left;
         labelTmp.richText = true;
+        labelTmp.raycastTarget = false;
 
         _contentGo = new GameObject("Content", typeof(RectTransform), typeof(Image),
             typeof(VerticalLayoutGroup), typeof(ContentSizeFitter));
@@ -215,7 +203,16 @@ public class LogisticsSection
 
         SetExpanded(false);
 
-        btn.onClick.AddListener(() => Toggle());
+        var hover = headerGo.GetComponent<HeaderHoverTint>();
+        hover.ArrowImage = _arrowImage;
+        hover.LabelText = labelTmp;
+        hover.ArrowNormal = arrowColors.normalColor;
+        hover.ArrowHighlighted = arrowColors.highlightedColor;
+        hover.ArrowPressed = arrowColors.pressedColor;
+        hover.LabelNormal = _headerTextColor;
+        hover.LabelHighlighted = arrowColors.highlightedColor;
+        hover.LabelPressed = arrowColors.pressedColor;
+        hover.OnClick = Toggle;
     }
 
     public void Toggle()
