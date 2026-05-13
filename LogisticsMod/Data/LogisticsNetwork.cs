@@ -4,7 +4,6 @@ using CustomUpdate;
 using Game;
 using Game.Info;
 using Game.ObjectInfoDataScripts;
-using LogisticsMod.Logic;
 using Manager;
 using ScriptableObjectScripts;
 using UnityEngine;
@@ -50,7 +49,6 @@ public static class LogisticsNetwork
             status = LogisticsRequestStatus.Pending
         };
         data.requests.Add(req);
-        LogisticsObserver.Log($"Added request: {rd.ID} x{amount} on {oi.ObjectName}");
         return req;
     }
 
@@ -65,7 +63,6 @@ public static class LogisticsNetwork
             isActive = true
         };
         data.providers.Add(prov);
-        LogisticsObserver.Log($"Added provider: {rd.ID} min={minimumKeep} on {oi.ObjectName}");
         return prov;
     }
 
@@ -161,19 +158,20 @@ public static class LogisticsNetwork
         return result;
     }
 
-    public static Dictionary<string, int> GetShipTypeCountsOnObject(ObjectInfo oi, bool isSpacecraft)
+    public static Dictionary<string, int> GetShipTypeCountsOnObject(ObjectInfo oi, bool isSpacecraft, Company player)
     {
         var result = new Dictionary<string, int>();
-        if (oi == null) return result;
+        if (oi == null || player == null) return result;
 
         if (isSpacecraft)
         {
             foreach (var sc in Object.FindObjectsOfType<Spacecraft>())
             {
                 if (sc == null || sc.spacecraftType == null) continue;
+                if (sc.GetCompany() != player) continue;
                 if (sc.spacecraftType.MagneticCatapult) continue;
                 if (sc.CurrentlyOnThisObject != oi) continue;
-                var tn = sc.spacecraftType.NameRocketType ?? "SC";
+                var tn = TypeKey(sc.spacecraftType.ID, sc.spacecraftType.NameRocketType ?? "SC");
                 if (!result.ContainsKey(tn)) result[tn] = 0;
                 result[tn]++;
             }
@@ -183,9 +181,10 @@ public static class LogisticsNetwork
             foreach (var lv in Object.FindObjectsOfType<LaunchVehicle>())
             {
                 if (lv == null || lv.launchVehicleType == null) continue;
+                if (lv.GetCompany() != player) continue;
                 if (lv.objectInfo != oi) continue;
                 if (!lv.IsReadyToLaunchReusable()) continue;
-                var tn = lv.launchVehicleType.Name ?? "LV";
+                var tn = TypeKey(lv.launchVehicleType.ID, lv.launchVehicleType.Name ?? "LV");
                 if (!result.ContainsKey(tn)) result[tn] = 0;
                 result[tn]++;
             }
@@ -218,6 +217,33 @@ public static class LogisticsNetwork
                     result.Add(rd);
             }
         }
+        return result;
+    }
+
+    public static bool ObjectRequiresLVForLaunch(ObjectInfo oi)
+    {
+        return oi?.NeedVehicleToLaunch() ?? false;
+    }
+
+    public static string TypeKey(string id, string fallbackName)
+    {
+        return !string.IsNullOrEmpty(id) ? id : fallbackName;
+    }
+
+    public static bool QuotaMatches(ShipQuotaEntry quota, string id, string fallbackName)
+    {
+        if (quota == null) return false;
+        var key = TypeKey(id, fallbackName);
+        return quota.typeName == key || quota.typeName == fallbackName;
+    }
+
+    public static int ActiveCountFor(Dictionary<string, int> active, string id, string fallbackName)
+    {
+        var result = 0;
+        if (active == null) return 0;
+        active.TryGetValue(TypeKey(id, fallbackName), out result);
+        if (!string.IsNullOrEmpty(fallbackName) && active.TryGetValue(fallbackName, out var legacy))
+            result += legacy;
         return result;
     }
 }

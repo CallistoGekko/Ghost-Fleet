@@ -9,6 +9,12 @@ internal static class TimeControllerPatches
     private static bool _subscribed;
     private static bool _postLoadFired;
 
+    public static void ResetRuntimeFlags()
+    {
+        _subscribed = false;
+        _postLoadFired = false;
+    }
+
     [HarmonyPrefix]
     private static void Prefix(TimeController __instance)
     {

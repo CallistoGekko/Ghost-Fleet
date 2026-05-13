@@ -3,7 +3,6 @@ using HarmonyLib;
 using Game;
 using Game.Info;
 using Game.UI.Windows.Elements.PlanMissionElements;
-using LogisticsMod.Logic;
 using Manager;
 
 namespace LogisticsMod.Patches;
@@ -11,6 +10,13 @@ namespace LogisticsMod.Patches;
 [HarmonyPatch]
 internal static class SaveLoadPatches
 {
+    [HarmonyPatch(typeof(LoadSaveManager), "ExtractAllFromSaveData")]
+    [HarmonyPrefix]
+    private static void ExtractAllPrefix()
+    {
+        ResetLoadState();
+    }
+
     [HarmonyPatch(typeof(LoadSaveManager), "SaveToFile", new[] { typeof(string) })]
     [HarmonyPostfix]
     private static void SaveToFilePostfix(string saveName)
@@ -29,12 +35,21 @@ internal static class SaveLoadPatches
         ReconcileAfterLoad();
     }
 
+    private static void ResetLoadState()
+    {
+        _pendingPostLoadTrigger = false;
+        Data.LogisticsNetwork.ClearAll();
+        Logic.LogisticsObserver.ResetRuntimeState();
+        TimeControllerPatches.ResetRuntimeFlags();
+    }
+
     private static void ReconcileAfterLoad()
     {
         var player = MonoBehaviourSingleton<GameManager>.Instance?.Player;
         var cm = MonoBehaviourSingleton<CycleMissionManager>.Instance;
         if (player == null || cm == null) return;
 
+        RestoreLogiCycleNames(player, cm);
         MatchCyclesToRequests(player, cm);
         MatchMissionsToRequests(player);
         _pendingPostLoadTrigger = true;
@@ -47,6 +62,36 @@ internal static class SaveLoadPatches
     }
     private static bool _pendingPostLoadTrigger;
 
+    private static void RestoreLogiCycleNames(Company player, CycleMissionManager cm)
+    {
+        foreach (var cmd in cm.GetAllCycleMission(player))
+        {
+            if (cmd.CheckComplete()) continue;
+            if (cmd.customNameFromPlanMission.StartsWith("[LOGI]")) continue;
+            if (cmd.cargoAllStart?.Tab == null || cmd.A == null || cmd.B == null) continue;
+
+            var reqData = Data.LogisticsNetwork.Get(cmd.B);
+            if (reqData == null) continue;
+
+            bool matched = false;
+            foreach (var tabRes in cmd.cargoAllStart.Tab)
+            {
+                if (reqData.requests.Any(r => r.ResourceDefinition == tabRes
+                    && r.status != Data.LogisticsRequestStatus.Satisfied))
+                {
+                    matched = true;
+                    break;
+                }
+            }
+
+            if (matched)
+            {
+                cmd.customNameFromPlanMission = $"[LOGI] {cmd.A.ObjectName} → {cmd.B.ObjectName}";
+                Logic.LogisticsObserver.Log($"[SAVELOAD] restored LOGI cycle name: \"{cmd.customNameFromPlanMission}\"");
+            }
+        }
+    }
+
     private static void MatchCyclesToRequests(Company player, CycleMissionManager cm)
     {
         foreach (var requesterOI in Data.LogisticsNetwork.GetAllObjects())
@@ -58,8 +103,11 @@ internal static class SaveLoadPatches
             {
                 if (cmd.CheckComplete()) continue;
                 if (cmd.B != requesterOI) continue;
-                if (!cmd.customNameFromPlanMission.StartsWith("[LOGI]")) continue;
                 if (cmd.cargoAllStart?.Tab == null) continue;
+
+                // Prefer name check (most reliable), fall back to A/B/cargo match (for pre-fix saves)
+                bool isLogi = cmd.customNameFromPlanMission.StartsWith("[LOGI]");
+                if (!isLogi && cmd.A == null) continue;
 
                 foreach (var tabRes in cmd.cargoAllStart.Tab)
                 {
@@ -68,12 +116,28 @@ internal static class SaveLoadPatches
                         if (req.status != Data.LogisticsRequestStatus.Pending
                             && req.status != Data.LogisticsRequestStatus.InProgress)
                             continue;
-                        if (req.ResourceDefinition == tabRes)
+                        if (req.ResourceDefinition != tabRes) continue;
+
+                        if (isLogi)
                         {
                             req.status = Data.LogisticsRequestStatus.InProgress;
-                            LogisticsObserver.Log($"Reconciled cycle: {cmd.A?.ObjectName} -> {cmd.B?.ObjectName} ({tabRes.ID})");
                             break;
                         }
+
+                        // Fallback: match by A (provider) and B (requester) + cargo
+                        foreach (var providerOI in Data.LogisticsNetwork.GetAllObjects())
+                        {
+                            if (providerOI != cmd.A) continue;
+                            var provData = Data.LogisticsNetwork.Get(providerOI);
+                            if (provData == null) continue;
+                            if (!provData.providers.Any(p => p.ResourceDefinition == tabRes && p.isActive))
+                                continue;
+
+                            req.status = Data.LogisticsRequestStatus.InProgress;
+                            Logic.LogisticsObserver.Log($"[SAVELOAD] matched unnamed cycle to request: {providerOI.ObjectName}->{requesterOI.ObjectName} rd={tabRes?.Name}");
+                            break;
+                        }
+                        if (req.status == Data.LogisticsRequestStatus.InProgress) break;
                     }
                 }
             }
@@ -111,7 +175,6 @@ internal static class SaveLoadPatches
                         if (req.ResourceDefinition == cargo.resourceType)
                         {
                             req.status = Data.LogisticsRequestStatus.InProgress;
-                            LogisticsObserver.Log($"Reconciled one-time: {mi.missionName} ({cargo.resourceType.ID})");
                             break;
                         }
                     }

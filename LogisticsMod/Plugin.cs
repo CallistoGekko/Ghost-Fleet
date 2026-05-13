@@ -1,6 +1,5 @@
 using BepInEx;
 using HarmonyLib;
-using LogisticsMod.Logic;
 
 namespace LogisticsMod;
 
@@ -13,6 +12,5 @@ public class Plugin : BaseUnityPlugin
     {
         Instance = this;
         Harmony.CreateAndPatchAll(typeof(Plugin).Assembly, "com.logisticsmod");
-        LogisticsObserver.Log("Plugin loaded!");
     }
 }
