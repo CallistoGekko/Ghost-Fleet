@@ -1,9 +1,5 @@
 # Logistics Tab - Solar Expanse Mod
 
-> WARNING: This project is vibe-coded.
->
-> The code in this repository was generated with AI assistance. It works surprisingly well for a logistics goblin, but expect rough edges and keep backup saves.
-
 A [BepInEx](https://github.com/BepInEx/BepInEx) mod for **Solar Expanse** that adds a Factorio-style logistics tab to object info windows. Configure bodies to **SEND** resources, configure other bodies to **GET** resources, and the mod plans recurring logistics shipments using your existing spacecraft, launch vehicles, orbital payload containers, and launch-assist infrastructure.
 
 ## Current Highlights
