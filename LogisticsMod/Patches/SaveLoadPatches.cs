@@ -50,6 +50,7 @@ internal static class SaveLoadPatches
         if (player == null || cm == null) return;
 
         MatchCyclesToRequests(player, cm);
+        LogisticsObserver.CleanupCompletedLogisticsMissionTrajectories(player);
         _pendingPostLoadTrigger = true;
     }
 

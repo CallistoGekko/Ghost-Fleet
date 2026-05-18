@@ -4,6 +4,7 @@ using CustomUpdate;
 using Game;
 using Game.Info;
 using Game.ObjectInfoDataScripts;
+using Game.UI.Windows.Elements.PlanMissionElements;
 using LogisticsMod.Logic;
 using Manager;
 using ScriptableObjectScripts;
@@ -107,6 +108,14 @@ public static class LogisticsNetwork
         return entry?.count ?? 0;
     }
 
+    public static ShipQuotaEntry GetQuotaEntry(ObjectInfo oi, string typeName, bool isSpacecraft)
+    {
+        var data = Get(oi);
+        if (data == null) return null;
+        var quotas = isSpacecraft ? data.spacecraftQuota : data.launchVehicleQuota;
+        return quotas.Find(q => q.typeName == typeName);
+    }
+
     public static void SetQuota(ObjectInfo oi, string typeName, int count, bool isSpacecraft)
     {
         var quotas = GetQuotas(oi, isSpacecraft);
@@ -115,6 +124,18 @@ public static class LogisticsNetwork
             entry.count = count;
         else if (count > 0)
             quotas.Add(new ShipQuotaEntry { typeName = typeName, count = count });
+    }
+
+    public static void SetQuotaTransferPreference(ObjectInfo oi, string typeName, bool isSpacecraft, bool useFastestTransfer)
+    {
+        var quotas = GetQuotas(oi, isSpacecraft);
+        var entry = quotas.Find(q => q.typeName == typeName);
+        if (entry == null)
+        {
+            entry = new ShipQuotaEntry { typeName = typeName, count = 1 };
+            quotas.Add(entry);
+        }
+        entry.useFastestTransfer = useFastestTransfer;
     }
 
     public static void RemoveQuota(ObjectInfo oi, string typeName, bool isSpacecraft)
@@ -190,11 +211,13 @@ public static class LogisticsNetwork
 
         if (isSpacecraft)
         {
+            var cm = MonoBehaviourSingleton<CycleMissionManager>.Instance;
             foreach (var sc in Object.FindObjectsOfType<Spacecraft>())
             {
                 if (sc == null || sc.spacecraftType == null) continue;
                 if (sc.GetCompany() != player) continue;
                 if (sc.CurrentlyOnThisObject != oi) continue;
+                if (!IsSpacecraftReadyForLogistics(sc, player, cm)) continue;
                 var tn = TypeKey(sc.spacecraftType.ID, sc.spacecraftType.NameRocketType ?? "SC");
                 if (!result.ContainsKey(tn)) result[tn] = 0;
                 result[tn]++;
@@ -214,6 +237,59 @@ public static class LogisticsNetwork
             }
         }
         return result;
+    }
+
+    public static int GetReadySpacecraftCountForQuota(ObjectInfo oi, ShipQuotaEntry quota)
+    {
+        if (oi == null || quota == null) return 0;
+        var player = MonoBehaviourSingleton<GameManager>.Instance?.Player;
+        if (player == null) return 0;
+        var cm = MonoBehaviourSingleton<CycleMissionManager>.Instance;
+        var count = 0;
+
+        foreach (var sc in Object.FindObjectsOfType<Spacecraft>())
+        {
+            if (sc == null || sc.spacecraftType == null) continue;
+            if (sc.GetCompany() != player) continue;
+            if (sc.CurrentlyOnThisObject != oi) continue;
+            if (!IsSpacecraftReadyForLogistics(sc, player, cm)) continue;
+            if (!QuotaMatches(quota, sc.spacecraftType.ID, sc.spacecraftType.NameRocketType ?? "SC")) continue;
+            count++;
+        }
+
+        return count;
+    }
+
+    private static bool IsSpacecraftReadyForLogistics(Spacecraft sc, Company player, CycleMissionManager cm)
+    {
+        if (sc == null || sc.spacecraftType == null || player == null) return false;
+        if (sc.GetCompany() != player) return false;
+        if (sc.CurrentPhase != Spacecraft.EPhase.None) return false;
+
+        var directCycle = cm?.GetCycleMission(sc);
+        if (directCycle != null && !directCycle.CheckComplete()) return false;
+
+        var controllerCycle = sc.CraftCyclicalMissionController?.CycleMissionsData;
+        if (controllerCycle != null && !controllerCycle.CheckComplete()) return false;
+
+        if (cm == null) return true;
+        foreach (var cmd in cm.GetAllCycleMission(player))
+        {
+            if (cmd == null || cmd.CheckComplete() || cmd.ListSC == null)
+                continue;
+
+            foreach (var sci in cmd.ListSC)
+            {
+                if (sci is not Spacecraft other)
+                    continue;
+                if (ReferenceEquals(sc, other))
+                    return false;
+                if (sc.ID >= 0 && other.ID >= 0 && sc.ID == other.ID)
+                    return false;
+            }
+        }
+
+        return true;
     }
 
     public static bool ObjectRequiresLVForLaunch(ObjectInfo oi)
@@ -245,10 +321,15 @@ public static class LogisticsNetwork
 
     public static HashSet<ResourceDefinition> GetNetworkResourcesSet(Company player)
     {
+        return GetNetworkResourcesSet(player, GetAllObjects());
+    }
+
+    public static HashSet<ResourceDefinition> GetNetworkResourcesSet(Company player, IEnumerable<ObjectInfo> objects)
+    {
         var result = new HashSet<ResourceDefinition>();
         if (player == null) return result;
 
-        foreach (var oi in GetAllObjects())
+        foreach (var oi in objects ?? Enumerable.Empty<ObjectInfo>())
         {
             var data = Get(oi);
             if (data == null) continue;
@@ -269,5 +350,3 @@ public static class LogisticsNetwork
         return result;
     }
 }
-
-

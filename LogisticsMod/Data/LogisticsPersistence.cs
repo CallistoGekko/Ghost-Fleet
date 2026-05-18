@@ -63,6 +63,7 @@ public static class LogisticsPersistence
     {
         public string typeName;
         public int count;
+        public bool useFastestTransfer;
     }
 
     public static void Save(string saveName)
@@ -119,10 +120,10 @@ public static class LogisticsPersistence
                 }
 
                 foreach (var q in ld.spacecraftQuota)
-                    so.spacecraftQuota.Add(new SavedQuota { typeName = q.typeName, count = q.count });
+                    so.spacecraftQuota.Add(new SavedQuota { typeName = q.typeName, count = q.count, useFastestTransfer = q.useFastestTransfer });
 
                 foreach (var q in ld.launchVehicleQuota)
-                    so.launchVehicleQuota.Add(new SavedQuota { typeName = q.typeName, count = q.count });
+                    so.launchVehicleQuota.Add(new SavedQuota { typeName = q.typeName, count = q.count, useFastestTransfer = q.useFastestTransfer });
 
                 data.objects.Add(so);
             }
@@ -199,10 +200,10 @@ public static class LogisticsPersistence
                 }
 
                 foreach (var sq in so.spacecraftQuota)
-                    ld.spacecraftQuota.Add(new ShipQuotaEntry { typeName = sq.typeName, count = sq.count });
+                    ld.spacecraftQuota.Add(new ShipQuotaEntry { typeName = sq.typeName, count = sq.count, useFastestTransfer = sq.useFastestTransfer });
 
                 foreach (var sq in so.launchVehicleQuota)
-                    ld.launchVehicleQuota.Add(new ShipQuotaEntry { typeName = sq.typeName, count = sq.count });
+                    ld.launchVehicleQuota.Add(new ShipQuotaEntry { typeName = sq.typeName, count = sq.count, useFastestTransfer = sq.useFastestTransfer });
             }
 
             LogisticsObserver.Log($"Loaded from {saveName}");

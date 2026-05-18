@@ -57,6 +57,7 @@ public class ShipQuotaEntry
 {
     public string typeName;
     public int count;
+    public bool useFastestTransfer;
 }
 
 [Serializable]

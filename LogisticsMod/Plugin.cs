@@ -6,7 +6,7 @@ using System.IO;
 
 namespace LogisticsMod;
 
-[BepInPlugin("com.logisticsmod", "Logistics Tab", "1.0.0")]
+[BepInPlugin("com.logisticsmod", "Logistics Tab", "0.2.0")]
 public class Plugin : BaseUnityPlugin
 {
     public static Plugin Instance { get; private set; }
@@ -16,6 +16,7 @@ public class Plugin : BaseUnityPlugin
     public static ConfigEntry<bool> ReturnFuelTrustDomesticOnlyAfterStockpile { get; private set; }
     public static ConfigEntry<int> ReturnFuelMinimumDomesticReserveDays { get; private set; }
     public static ConfigEntry<double> CyclePlanningGraceDays { get; private set; }
+    public static ConfigEntry<double> BlockedMissionRetryCooldownDays { get; private set; }
     public static ConfigEntry<bool> VerboseLogging { get; private set; }
     private static ConfigFile _pluginConfig;
 
@@ -36,6 +37,8 @@ public class Plugin : BaseUnityPlugin
             "Reserved for a later production-rate policy. The current first pass uses stockpile only.");
         CyclePlanningGraceDays = _pluginConfig.Bind("Diagnostics", "CyclePlanningGraceDays", 3.0,
             "In-game days a freshly created LOGI cycle is considered 'still being planned' before being treated as stale. The async code job system normally fires inside this window; raise if you see spurious CLEANUP warnings under heavy time acceleration.");
+        BlockedMissionRetryCooldownDays = _pluginConfig.Bind("Diagnostics", "BlockedMissionRetryCooldownDays", 30.0,
+            "In-game days to wait before retrying the same blocked or stale logistics dispatch attempt.");
         VerboseLogging = _pluginConfig.Bind("Diagnostics", "VerboseLogging", false,
             "When enabled, per-request route and dispatch diagnostics are written to BepInEx/LogisticsMod_*.log.");
         _pluginConfig.Save();

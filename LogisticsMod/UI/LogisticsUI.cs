@@ -43,7 +43,6 @@ public class LogisticsUI : MonoBehaviour
     private bool _built;
     private TMP_FontAsset _font;
     private RuntimeUiStyle _runtimeStyle = new RuntimeUiStyle();
-    private static bool _dumpedStockUiLayout;
 
     private LogisticsSection _getSection;
     private LogisticsSection _sendSection;
@@ -96,16 +95,15 @@ public class LogisticsUI : MonoBehaviour
             var styleButton = oics.expandButtons != null && oics.expandButtons.Count > SectionIndexPlannedMission ? oics.expandButtons[SectionIndexPlannedMission] : null;
             var styleIcon = oics.buttonsIcons != null && oics.buttonsIcons.Count > SectionIndexPlannedMission ? oics.buttonsIcons[SectionIndexPlannedMission] : null;
             CaptureRuntimeStyle(oics, styleButton);
-            DumpStockUiLayout(oics);
 
-            _getSection = new LogisticsSection(_parentRt, FormatSectionTitle("GET", "Request Resources"), _font, sectionWidth,
+            _getSection = new LogisticsSection(_parentRt, FormatSectionTitle("GET", "Import Resources"), _font, sectionWidth,
                 styleButton, styleIcon, oics.spriteExpand, oics.spriteCollapse,
                 _runtimeStyle.HeaderHeight, _runtimeStyle.HeaderFontSize, _runtimeStyle.HeaderBackgroundColor,
                 _runtimeStyle.HeaderTextColor, _runtimeStyle.HeaderDividerColor, new Color(0f, 0f, 0f, 0f),
                 _runtimeStyle.HasHeaderButtonColors ? _runtimeStyle.HeaderButtonColors : null);
             _sections.Add(_getSection);
 
-            _sendSection = new LogisticsSection(_parentRt, FormatSectionTitle("SEND", "Provide Resources"), _font, sectionWidth,
+            _sendSection = new LogisticsSection(_parentRt, FormatSectionTitle("SEND", "Export Resources"), _font, sectionWidth,
                 styleButton, styleIcon, oics.spriteExpand, oics.spriteCollapse,
                 _runtimeStyle.HeaderHeight, _runtimeStyle.HeaderFontSize, _runtimeStyle.HeaderBackgroundColor,
                 _runtimeStyle.HeaderTextColor, _runtimeStyle.HeaderDividerColor, new Color(0f, 0f, 0f, 0f),
@@ -249,194 +247,11 @@ public class LogisticsUI : MonoBehaviour
                 }
             }
 
-            LogisticsObserver.Log($"UISTYLE section={sectionName} headerHeight={headerRect?.rect.height:0.#} headerBg={FormatColor(headerImage?.color ?? Color.clear)} headerFont={headerTmp?.font?.name ?? "null"} headerFontSize={headerTmp?.fontSize:0.#} headerColor={FormatColor(headerTmp?.color ?? Color.clear)} rowHeight={rowRect?.rect.height:0.#} rowBg={FormatColor(rowImage?.color ?? Color.clear)} rowFont={rowTmp?.font?.name ?? "null"} rowFontSize={rowTmp?.fontSize:0.#} rowColor={FormatColor(rowTmp?.color ?? Color.clear)} rowButtonNormal={FormatColor(rowButton?.colors.normalColor ?? Color.clear)}");
         }
         catch (System.Exception ex)
         {
             LogisticsObserver.LogWarning($"UISTYLE capture failed for {sectionName}: {ex.Message}");
         }
-    }
-
-    private static string FormatColor(Color c)
-    {
-        return $"{c.r:0.###},{c.g:0.###},{c.b:0.###},{c.a:0.###}";
-    }
-
-    private void DumpStockUiLayout(ObjectInfoCollapseSections oics)
-    {
-        if (_dumpedStockUiLayout || oics == null) return;
-        _dumpedStockUiLayout = true;
-
-        try
-        {
-            LogisticsObserver.Log("UISTYLE_DUMP begin ObjectInfo stock layout");
-            DumpStockSection(oics, SectionIndexSpacecraft, "SPACECRAFT");
-            DumpStockSection(oics, SectionIndexLaunchVehicle, "LAUNCH VEHICLES");
-            DumpStockSection(oics, SectionIndexPlannedMission, "PLANNED MISSIONS");
-            DumpUiObject("ObjectInfoWindowRoot", _objectInfoWindow?.gameObject, 2);
-            LogisticsObserver.Log("UISTYLE_DUMP end ObjectInfo stock layout");
-        }
-        catch (System.Exception ex)
-        {
-            LogisticsObserver.LogWarning("UISTYLE_DUMP failed: " + ex);
-        }
-    }
-
-    private void DumpStockSection(ObjectInfoCollapseSections oics, int index, string name)
-    {
-        LogisticsObserver.Log($"UISTYLE_DUMP section[{index}] {name}");
-        DumpUiObject($"{name}.expandButton", GetListItem(oics.expandButtons, index)?.gameObject, 4);
-        DumpUiObject($"{name}.buttonIcon", GetListItem(oics.buttonsIcons, index)?.gameObject, 2);
-        DumpUiObject($"{name}.scrollRect", GetListItem(oics.scrollRects, index)?.gameObject, 4);
-        DumpUiObject($"{name}.uiList", GetListItem(oics.uiLists, index)?.gameObject, 4);
-    }
-
-    private static T GetListItem<T>(IList<T> list, int index) where T : class
-    {
-        return list != null && index >= 0 && index < list.Count ? list[index] : null;
-    }
-
-    private void DumpUiObject(string label, GameObject go, int maxDepth)
-    {
-        if (go == null)
-        {
-            LogisticsObserver.Log($"UISTYLE_DUMP {label}: null");
-            return;
-        }
-
-        DumpTransformRecursive(label, go.transform, 0, maxDepth);
-    }
-
-    private void DumpTransformRecursive(string label, Transform transform, int depth, int maxDepth)
-    {
-        if (transform == null || depth > maxDepth) return;
-        DumpTransform(label, transform, depth);
-
-        if (depth >= maxDepth) return;
-        for (int i = 0; i < transform.childCount; i++)
-        {
-            if (i >= 12)
-            {
-                LogisticsObserver.Log($"UISTYLE_DUMP {label} depth={depth + 1} ... {transform.childCount - i} more children");
-                break;
-            }
-
-            DumpTransformRecursive(label, transform.GetChild(i), depth + 1, maxDepth);
-        }
-    }
-
-    private void DumpTransform(string label, Transform transform, int depth)
-    {
-        var go = transform.gameObject;
-        var rt = transform as RectTransform;
-        var layout = go.GetComponent<LayoutElement>();
-        var vlg = go.GetComponent<VerticalLayoutGroup>();
-        var hlg = go.GetComponent<HorizontalLayoutGroup>();
-        var glg = go.GetComponent<GridLayoutGroup>();
-        var img = go.GetComponent<Image>();
-        var btn = go.GetComponent<Button>();
-        var tmp = go.GetComponent<TextMeshProUGUI>();
-        var fitter = go.GetComponent<ContentSizeFitter>();
-        var scroll = go.GetComponent<ScrollRect>();
-
-        var indent = new string(' ', depth * 2);
-        LogisticsObserver.Log(
-            $"UISTYLE_DUMP {label} {indent}{PathOf(transform)} active={go.activeSelf}/{go.activeInHierarchy} sibling={transform.GetSiblingIndex()}" +
-            $" rt={FormatRect(rt)} layout={FormatLayout(layout)} vlg={FormatVlg(vlg)} hlg={FormatHlg(hlg)} glg={FormatGlg(glg)}" +
-            $" image={FormatImage(img)} button={FormatButton(btn)} tmp={FormatTmp(tmp)} fitter={FormatFitter(fitter)} scroll={FormatScroll(scroll)}");
-    }
-
-    private static string PathOf(Transform transform)
-    {
-        if (transform == null) return "null";
-        var parts = new List<string>();
-        while (transform != null)
-        {
-            parts.Add(transform.name);
-            transform = transform.parent;
-        }
-        parts.Reverse();
-        return string.Join("/", parts);
-    }
-
-    private static string FormatRect(RectTransform rt)
-    {
-        if (rt == null) return "null";
-        return $"aMin={FormatVec(rt.anchorMin)} aMax={FormatVec(rt.anchorMax)} pivot={FormatVec(rt.pivot)} pos={FormatVec(rt.anchoredPosition)} size={FormatVec(rt.sizeDelta)} rect={rt.rect.width:0.#}x{rt.rect.height:0.#}";
-    }
-
-    private static string FormatLayout(LayoutElement layout)
-    {
-        if (layout == null) return "null";
-        return $"min={layout.minWidth:0.#}x{layout.minHeight:0.#} pref={layout.preferredWidth:0.#}x{layout.preferredHeight:0.#} flex={layout.flexibleWidth:0.#}x{layout.flexibleHeight:0.#} ignore={layout.ignoreLayout}";
-    }
-
-    private static string FormatVlg(VerticalLayoutGroup group)
-    {
-        if (group == null) return "null";
-        return $"pad={FormatOffset(group.padding)} space={group.spacing:0.#} ctrl={group.childControlWidth}/{group.childControlHeight} expand={group.childForceExpandWidth}/{group.childForceExpandHeight} align={group.childAlignment}";
-    }
-
-    private static string FormatHlg(HorizontalLayoutGroup group)
-    {
-        if (group == null) return "null";
-        return $"pad={FormatOffset(group.padding)} space={group.spacing:0.#} ctrl={group.childControlWidth}/{group.childControlHeight} expand={group.childForceExpandWidth}/{group.childForceExpandHeight} align={group.childAlignment}";
-    }
-
-    private static string FormatGlg(GridLayoutGroup group)
-    {
-        if (group == null) return "null";
-        return $"pad={FormatOffset(group.padding)} space={FormatVec(group.spacing)} cell={FormatVec(group.cellSize)} align={group.childAlignment} constraint={group.constraint}/{group.constraintCount}";
-    }
-
-    private static string FormatImage(Image image)
-    {
-        if (image == null) return "null";
-        return $"color={FormatColor(image.color)} sprite={image.sprite?.name ?? "null"} type={image.type} material={image.material?.name ?? "null"} preserve={image.preserveAspect}";
-    }
-
-    private static string FormatButton(Button button)
-    {
-        if (button == null) return "null";
-        var colors = button.colors;
-        return $"interactable={button.interactable} transition={button.transition} normal={FormatColor(colors.normalColor)} highlighted={FormatColor(colors.highlightedColor)} pressed={FormatColor(colors.pressedColor)} target={button.targetGraphic?.name ?? "null"}";
-    }
-
-    private static string FormatTmp(TextMeshProUGUI tmp)
-    {
-        if (tmp == null) return "null";
-        var text = tmp.text ?? "";
-        text = text.Replace("\r", "\\r").Replace("\n", "\\n");
-        if (text.Length > 80) text = text.Substring(0, 80) + "...";
-        return $"text=\"{text}\" font={tmp.font?.name ?? "null"} size={tmp.fontSize:0.#} color={FormatColor(tmp.color)} align={tmp.alignment} style={tmp.fontStyle} rich={tmp.richText} margins={FormatVec4(tmp.margin)}";
-    }
-
-    private static string FormatFitter(ContentSizeFitter fitter)
-    {
-        if (fitter == null) return "null";
-        return $"h={fitter.horizontalFit} v={fitter.verticalFit}";
-    }
-
-    private static string FormatScroll(ScrollRect scroll)
-    {
-        if (scroll == null) return "null";
-        return $"enabled={scroll.enabled} viewport={scroll.viewport?.name ?? "null"} content={scroll.content?.name ?? "null"} horiz={scroll.horizontal} vert={scroll.vertical}";
-    }
-
-    private static string FormatOffset(RectOffset offset)
-    {
-        if (offset == null) return "null";
-        return $"{offset.left},{offset.right},{offset.top},{offset.bottom}";
-    }
-
-    private static string FormatVec(Vector2 v)
-    {
-        return $"{v.x:0.#},{v.y:0.#}";
-    }
-
-    private static string FormatVec4(Vector4 v)
-    {
-        return $"{v.x:0.#},{v.y:0.#},{v.z:0.#},{v.w:0.#}";
     }
 
     private string FormatSectionTitle(string primary, string secondary)
@@ -463,7 +278,7 @@ public class LogisticsUI : MonoBehaviour
         var newId = newOi?.id ?? -1;
         var prevName = _currentObjectInfo?.ObjectName ?? "null";
         var prevId = _currentObjectInfo?.id ?? -1;
-        LogisticsObserver.Log($"RefreshData: \"{newName}\" (id={newId}), _built={_built}, prev=\"{prevName}\" (id={prevId})");
+        LogisticsObserver.LogVerbose($"RefreshData: \"{newName}\" (id={newId}), _built={_built}, prev=\"{prevName}\" (id={prevId})");
 
         if (newOi != null && _currentObjectInfo != null && newId == prevId && newName != prevName)
             LogisticsObserver.LogWarning($"DIAG RefreshData: SAME id ({newId}) but DIFFERENT name! prev=\"{prevName}\" new=\"{newName}\"");
@@ -476,11 +291,11 @@ public class LogisticsUI : MonoBehaviour
                 var storedOiName = (dictData.ObjectInfo as ObjectInfo)?.ObjectName ?? "NULL";
                 if (storedOiName != newName)
                     LogisticsObserver.LogWarning($"DIAG RefreshData: dict entry id={newId} has storedOI=\"{storedOiName}\" but incoming OI name=\"{newName}\" — MISMATCH!");
-                LogisticsObserver.Log($"DIAG RefreshData: dict data for id={newId}: {dictData.requests.Count}req {dictData.providers.Count}prov");
+                LogisticsObserver.LogVerbose($"DIAG RefreshData: dict data for id={newId}: {dictData.requests.Count}req {dictData.providers.Count}prov");
             }
             else
             {
-                LogisticsObserver.Log($"DIAG RefreshData: NO dict entry for id={newId} name=\"{newName}\"");
+                LogisticsObserver.LogVerbose($"DIAG RefreshData: NO dict entry for id={newId} name=\"{newName}\"");
             }
         }
 
@@ -506,7 +321,7 @@ public class LogisticsUI : MonoBehaviour
         if (!force && liveId == currentId && liveCompany == currentCompany)
             return;
 
-        LogisticsObserver.Log($"UI sync-from-window: force={force} live=\"{liveOi?.ObjectName ?? "NULL"}\"(id={liveId}) cached=\"{_currentObjectInfo?.ObjectName ?? "NULL"}\"(id={currentId})");
+        LogisticsObserver.LogVerbose($"UI sync-from-window: force={force} live=\"{liveOi?.ObjectName ?? "NULL"}\"(id={liveId}) cached=\"{_currentObjectInfo?.ObjectName ?? "NULL"}\"(id={currentId})");
         RefreshData(liveData);
     }
 
@@ -540,7 +355,7 @@ public class LogisticsUI : MonoBehaviour
         _getSection.ClearContent();
         var data = Data.LogisticsNetwork.Get(_currentObjectInfo);
         var requestCount = data?.requests.Count ?? 0;
-        LogisticsObserver.Log($"BuildGet for {_currentObjectInfo?.ObjectName}: {requestCount} requests");
+        LogisticsObserver.LogVerbose($"BuildGet for {_currentObjectInfo?.ObjectName}: {requestCount} requests");
 
         if (requestCount > 0)
         {
@@ -577,10 +392,10 @@ public class LogisticsUI : MonoBehaviour
         }
         else
         {
-            _getSection.AddTextRow("No resource requests configured.", _font, 13f, new Color(0.5f, 0.5f, 0.5f, 1f));
+            _getSection.AddTextRow("No import rules configured.", _font, 13f, new Color(0.5f, 0.5f, 0.5f, 1f));
         }
 
-        AddBigButton(_getSection.ContentArea, "+ Add Request", _runtimeStyle.ConfirmButtonColor, () =>
+        AddBigButton(_getSection.ContentArea, "+ Add Import Rule", _runtimeStyle.ConfirmButtonColor, () =>
         {
             ShowResourcePicker(_getSection, true);
         });
@@ -706,7 +521,7 @@ public class LogisticsUI : MonoBehaviour
                 var displayName = ResourceLabel(rd, prov.resourceDef?.id);
 
                 var row = MakeHLRow(_sendSection.ContentArea, 24f, 8);
-                MakeTMP(row.transform, $"{displayName}: min keep {prov.minimumKeep:0.#}", 13, new Color(0.7f, 0.7f, 0.7f, 1f));
+                MakeTMP(row.transform, $"{displayName}: keep {prov.minimumKeep:0.#} in reserve", 13, new Color(0.7f, 0.7f, 0.7f, 1f));
                 MakeXButton(row.transform, () =>
                 {
                     var capturedOi = _currentObjectInfo;
@@ -719,10 +534,10 @@ public class LogisticsUI : MonoBehaviour
         }
         else
         {
-            _sendSection.AddTextRow("No resource exports configured.", _font, 13f, new Color(0.5f, 0.5f, 0.5f, 1f));
+            _sendSection.AddTextRow("No export rules configured.", _font, 13f, new Color(0.5f, 0.5f, 0.5f, 1f));
         }
 
-        AddBigButton(_sendSection.ContentArea, "+ Add Provider", _runtimeStyle.ActionButtonColor, () =>
+        AddBigButton(_sendSection.ContentArea, "+ Add Export Rule", _runtimeStyle.ActionButtonColor, () =>
         {
             ShowResourcePicker(_sendSection, false);
         });
@@ -755,10 +570,6 @@ public class LogisticsUI : MonoBehaviour
         var data = Data.LogisticsNetwork.Get(_currentObjectInfo);
         var quotas = data?.spacecraftQuota ?? new List<Data.ShipQuotaEntry>();
 
-        var player = MonoBehaviourSingleton<GameManager>.Instance?.Player;
-        LogisticsObserver.GetActiveCycleCounts(player, out var scActive, out var lvActive);
-        var active = isSpacecraft ? scActive : lvActive;
-
         if (quotas.Count > 0)
         {
             foreach (var q in quotas)
@@ -766,20 +577,31 @@ public class LogisticsUI : MonoBehaviour
                 var quotaTypeName = q.typeName;
                 var displayName = ShipDisplayName(quotaTypeName, true);
                 var quotaCount = q.count;
-                active.TryGetValue(quotaTypeName, out var activeCount);
-                var free = quotaCount - activeCount;
+                var readyHere = Data.LogisticsNetwork.GetReadySpacecraftCountForQuota(_currentObjectInfo, q);
 
                 var row = MakeHLRow(section.ContentArea, 28f, 4);
                 row.GetComponent<Image>().color = _runtimeStyle.RowBackgroundColor;
 
-                var countColor = free > 0
+                var countColor = readyHere > 0
                     ? new Color(0.5f, 0.9f, 0.5f, 1f)
                     : new Color(0.9f, 0.55f, 0.1f, 1f);
-                var countLabel = MakeTMP(row.transform, $"{free}/{quotaCount}", 14, countColor);
+                var countLabel = MakeTMP(row.transform, $"{readyHere}/{quotaCount}", 14, countColor);
                 countLabel.alignment = TextAlignmentOptions.Center;
                 countLabel.rectTransform.sizeDelta = new Vector2(72, 0);
 
                 MakeTMP(row.transform, displayName, _runtimeStyle.RowFontSize, _runtimeStyle.RowTextColor);
+
+                var transferLabel = q.useFastestTransfer ? "[x] Fast" : "[ ] Fast";
+                var transferColor = q.useFastestTransfer
+                    ? new Color(0.35f, 0.58f, 0.82f, 1f)
+                    : new Color(0.33f, 0.43f, 0.34f, 1f);
+                AddSmallButton(row.transform, transferLabel, transferColor, () =>
+                {
+                    var capturedOi = _currentObjectInfo;
+                    Data.LogisticsNetwork.SetQuotaTransferPreference(capturedOi, quotaTypeName, true, !q.useFastestTransfer);
+                    BuildShipSection(section, isSpacecraft);
+                    RebuildSectionLayout(section);
+                });
 
                 AddSmallButton(row.transform, "-", _runtimeStyle.SmallButtonColor, () =>
                 {
@@ -887,10 +709,6 @@ public class LogisticsUI : MonoBehaviour
         var typeName = isSpacecraft ? "spacecraft" : "launch vehicles";
         var typeCounts = Data.LogisticsNetwork.GetShipTypeCountsOnObject(_currentObjectInfo, isSpacecraft);
 
-        var player = MonoBehaviourSingleton<GameManager>.Instance?.Player;
-        LogisticsObserver.GetActiveCycleCounts(player, out var scActive, out var lvActive);
-        var active = isSpacecraft ? scActive : lvActive;
-
         if (typeCounts.Count == 0)
         {
             section.AddTextRow($"No {typeName} found on this object.", _font);
@@ -903,14 +721,29 @@ public class LogisticsUI : MonoBehaviour
             var shipTypeName = kv.Key;
             var totalCount = kv.Value;
             var currentQuota = Data.LogisticsNetwork.GetQuota(_currentObjectInfo, shipTypeName, isSpacecraft);
-            active.TryGetValue(shipTypeName, out var activeCount);
-            var freeQuota = (currentQuota > 0) ? $"{currentQuota - activeCount}/{currentQuota}" : "0";
-            var displayQuota = currentQuota > 0 ? $"quota: {freeQuota}" : "no quota";
+            var quotaEntry = Data.LogisticsNetwork.GetQuotaEntry(_currentObjectInfo, shipTypeName, isSpacecraft);
+            var displayQuota = currentQuota > 0 ? $"quota: {totalCount}/{currentQuota}" : "no quota";
+            var transferText = !isSpacecraft || quotaEntry == null
+                ? ""
+                : $" (route: {(quotaEntry.useFastestTransfer ? "Fastest" : "Optimal")})";
 
             var row = MakeHLRow(section.ContentArea, 26f, 4);
             row.GetComponent<Image>().color = _runtimeStyle.RowBackgroundColor;
 
-            MakeTMP(row.transform, $"{ShipDisplayName(shipTypeName, isSpacecraft)}  {totalCount} available ({displayQuota})", _runtimeStyle.RowFontSize, _runtimeStyle.RowTextColor);
+            MakeTMP(row.transform, $"{ShipDisplayName(shipTypeName, isSpacecraft)}  {totalCount} available ({displayQuota}){transferText}", _runtimeStyle.RowFontSize, _runtimeStyle.RowTextColor);
+
+            if (isSpacecraft && currentQuota > 0)
+            {
+                var useFastest = quotaEntry?.useFastestTransfer ?? false;
+                AddSmallButton(row.transform, useFastest ? "[x] Fast" : "[ ] Fast",
+                    useFastest ? new Color(0.35f, 0.58f, 0.82f, 1f) : new Color(0.33f, 0.43f, 0.34f, 1f), () =>
+                    {
+                        var capturedOi = _currentObjectInfo;
+                        Data.LogisticsNetwork.SetQuotaTransferPreference(capturedOi, shipTypeName, true, !useFastest);
+                        ShowShipPicker(section, isSpacecraft);
+                        RebuildSectionLayout(section);
+                    });
+            }
 
             AddSmallButton(row.transform, "+", _runtimeStyle.SmallButtonPositiveColor, () =>
             {
@@ -1006,7 +839,7 @@ public class LogisticsUI : MonoBehaviour
             warnTmp.rectTransform.sizeDelta = new Vector2(0, 20);
         }
 
-        var titleLabel = MakeTMP(section.ContentArea, $"{(isGet ? "Request" : "Provide")}: {ResourceLabel(rd)}", 14, new Color(0.9f, 0.9f, 0.5f, 1f));
+        var titleLabel = MakeTMP(section.ContentArea, $"{(isGet ? "Import target" : "Export reserve")}: {ResourceLabel(rd)}", 14, new Color(0.9f, 0.9f, 0.5f, 1f));
         titleLabel.rectTransform.sizeDelta = new Vector2(0, 22);
 
         var amountRow = MakeHLRow(section.ContentArea, 34f, 0);
@@ -1039,6 +872,10 @@ public class LogisticsUI : MonoBehaviour
                     targetSummary.text = $"Target: {targetAmount:0.#}";
                 if (minimumSummary != null)
                     minimumSummary.text = useMinimum ? $"Minimum: {minimumAmount:0.#}" : "Minimum: off";
+            }
+            else
+            {
+                amountDisplay.text = "Keep: " + amountDisplay.text;
             }
         }
 
@@ -1133,7 +970,7 @@ public class LogisticsUI : MonoBehaviour
             if (_inputConfirmed) return;
             _inputConfirmed = true;
             var finalAmount = isGet ? targetAmount : currentAmount;
-            if (finalAmount > 0)
+            if (isGet ? finalAmount > 0 : finalAmount >= 0)
             {
                 if (isGet)
                     Data.LogisticsNetwork.AddRequest(capturedOi, rd, targetAmount, minimumAmount, useMinimum);
@@ -1207,6 +1044,7 @@ public class LogisticsUI : MonoBehaviour
         layout.flexibleWidth = 1f;
         btnGo.GetComponent<Image>().color = color;
         var btn = btnGo.GetComponent<Button>();
+        btn.transition = Selectable.Transition.None;
         btn.navigation = new Navigation { mode = Navigation.Mode.None };
 
         var labelTmp = MakeTMP(btnGo.transform, text, 14, new Color(0.86f, 0.86f, 0.88f, 1f));
@@ -1225,6 +1063,7 @@ public class LogisticsUI : MonoBehaviour
         btnGo.GetComponent<LayoutElement>().preferredHeight = 24f;
         btnGo.GetComponent<Image>().color = color;
         var btn = btnGo.GetComponent<Button>();
+        btn.transition = Selectable.Transition.None;
         btn.navigation = new Navigation { mode = Navigation.Mode.None };
 
         var labelTmp = MakeTMP(btnGo.transform, text, 12, new Color(0.86f, 0.86f, 0.88f, 1f));

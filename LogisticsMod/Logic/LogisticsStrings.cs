@@ -35,6 +35,7 @@ internal static class LogisticsStrings
     public static string WaitingForSpacecraftAt(ObjectInfo orbit) => string.Format(Loc("note.waiting_spacecraft", "Waiting for spacecraft at {0}"), Name(orbit));
     public static string WaitingForLaunchVehicleAt(ObjectInfo current) => string.Format(Loc("note.waiting_lv", "Waiting for launch vehicle at {0}"), Name(current));
     public static string AwaitingReturnFrom(ObjectInfo current) => string.Format(Loc("note.awaiting_return", "Awaiting return from {0}"), Name(current));
+    public static string ReturnRetryCooldown(double days) => string.Format(Loc("note.return_retry_cooldown", "Return launch blocked; retrying in {0:0.#} days"), days);
     public static string WaitingForReturnFuel(ResourceDefinition fuelType, ObjectInfo requester) => string.Format(Loc("note.waiting_return_fuel", "Waiting for return fuel {0} at {1}"), Name(fuelType), Name(requester));
     public static string ReturnBlockedSuffix(string baseNote, string vehicleName) => string.Format(Loc("note.return_blocked_on_ship", "{0} on {1}"), baseNote ?? "", vehicleName ?? "?");
 
