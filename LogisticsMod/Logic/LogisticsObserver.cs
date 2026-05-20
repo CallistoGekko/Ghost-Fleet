@@ -30,23 +30,30 @@ public static class LogisticsObserver
     private const double ReturnCycleBlockedCooldownDays = 30.0;
     private const double ReturnCycleEscalatedCooldownDays = 180.0;
     private const int ReturnCycleEscalationFailureThreshold = 3;
+    private const int MaxReturnFuelProbeCacheEntries = 256;
     private static readonly TimeSpan ReturnCycleWallClockThrottle = TimeSpan.FromSeconds(10);
     private static readonly Dictionary<CycleMissionsData, DateTime> _cycleCreatedAt = new Dictionary<CycleMissionsData, DateTime>();
     private static readonly Dictionary<CycleMissionsData, int> _cyclePlanningFailures = new Dictionary<CycleMissionsData, int>();
     private const int MaxCyclePlanningFailures = 3;
     private static readonly Dictionary<string, ReturnFuelProbeState> _returnFuelProbeCache = new Dictionary<string, ReturnFuelProbeState>();
+    private static readonly Queue<string> _returnFuelProbeCacheOrder = new Queue<string>();
     private static readonly Dictionary<string, DateTime> _routePlanningLocks = new Dictionary<string, DateTime>();
     private static readonly Dictionary<string, double> _committedStock = new Dictionary<string, double>();
     private static readonly Dictionary<int, string> _cycleNameByShipId = new Dictionary<int, string>();
     private static readonly Dictionary<string, string> _cycleNameByRouteKey = new Dictionary<string, string>();
-    private static LaunchVehicle[] _cachedLaunchVehicles;
-    private static float _cachedLaunchVehiclesTime;
     private static Spacecraft[] _cachedSpacecraft;
     private static float _cachedSpacecraftTime;
     private static DateTime _committedStockWallClock;
-    private static DateTime _nextTrajectoryMaintenanceScan;
+    private static DateTime _nextCompletedTrajectoryScan;
+    private static DateTime _nextOrphanTrajectoryScan;
     private const double CommittedStockWindowSeconds = 1.0;
-    private const double TrajectoryMaintenanceScanDays = 30.0;
+    private const double CompletedTrajectoryScanDays = 30.0;
+    private const double OrphanTrajectoryScanDays = 180.0;
+    private const double RequestPlanThrottleDays = 3.0;
+    private const int MaxPrecalculateRouteCacheEntries = 128;
+    private static readonly Dictionary<string, RequestPlanThrottleState> _requestPlanThrottle = new Dictionary<string, RequestPlanThrottleState>();
+    private static readonly Dictionary<string, PMMissionParameter.PrecalculateDataToShortFly> _precalculateRouteCache = new Dictionary<string, PMMissionParameter.PrecalculateDataToShortFly>();
+    private static readonly Queue<string> _precalculateRouteCacheOrder = new Queue<string>();
 
     private sealed class PlannerLaunchVehicleInfo : ILaunchVehicleInfo
     {
@@ -109,6 +116,13 @@ public static class LogisticsObserver
         public PMMissionParameter.EPlanMissionResult Result;
         public string FailureReason;
     }
+
+    private sealed class RequestPlanThrottleState
+    {
+        public DateTime NextEvaluation;
+        public string Signature;
+    }
+
     private static readonly Dictionary<string, DateTime> _pendingPlanningDeliveries = new Dictionary<string, DateTime>();
     private static readonly Dictionary<string, BlockedRetryState> _blockedPlanningRetries = new Dictionary<string, BlockedRetryState>();
     private static readonly Dictionary<int, ReturnHomeState> _returnHomeByShipId = new Dictionary<int, ReturnHomeState>();
@@ -254,6 +268,74 @@ public static class LogisticsObserver
         return snapshot;
     }
 
+    public static void ApplyCachedPrecalculateData(PMMissionParameter pmp)
+    {
+        var key = BuildPrecalculateRouteKey(pmp);
+        if (key == null) return;
+        if (!_precalculateRouteCache.TryGetValue(key, out var cached)) return;
+
+        pmp.SetPrecalculateDataToShortFly(ClonePrecalculateData(cached));
+        LogVerbose($"PRECACHE apply: key={key} moonCase={cached.moonCase}");
+    }
+
+    public static void CachePrecalculateData(PMMissionParameter pmp, string context)
+    {
+        if (pmp == null || !pmp.MoonCase)
+            return;
+
+        var key = BuildPrecalculateRouteKey(pmp);
+        if (key == null) return;
+
+        var data = new PMMissionParameter.PrecalculateDataToShortFly
+        {
+            moonCase = pmp.MoonCase,
+            moonCaseCostMax = pmp.MoonCaseCostMax,
+            moonCaseCostMin = pmp.MoonCaseCostMin,
+            minDeltaVMoonCase = pmp.MinDeltaVMoonCase
+        };
+
+        if (!_precalculateRouteCache.ContainsKey(key))
+            _precalculateRouteCacheOrder.Enqueue(key);
+        _precalculateRouteCache[key] = data;
+
+        while (_precalculateRouteCacheOrder.Count > MaxPrecalculateRouteCacheEntries)
+        {
+            var evict = _precalculateRouteCacheOrder.Dequeue();
+            _precalculateRouteCache.Remove(evict);
+        }
+
+        LogVerbose($"PRECACHE store: context={context} key={key} minDV={data.minDeltaVMoonCase:0.#}");
+    }
+
+    private static PMMissionParameter.PrecalculateDataToShortFly ClonePrecalculateData(PMMissionParameter.PrecalculateDataToShortFly source)
+    {
+        if (source == null) return null;
+        return new PMMissionParameter.PrecalculateDataToShortFly
+        {
+            moonCase = source.moonCase,
+            moonCaseCostMax = source.moonCaseCostMax,
+            moonCaseCostMin = source.moonCaseCostMin,
+            minDeltaVMoonCase = source.minDeltaVMoonCase
+        };
+    }
+
+    private static string BuildPrecalculateRouteKey(PMMissionParameter pmp)
+    {
+        if (pmp == null || pmp.FlyCompany == null)
+            return null;
+
+        var source = pmp.Start;
+        var target = pmp.Target;
+        if (source == null || target == null)
+            return null;
+
+        var scType = pmp.SC?.GetTypeSpaceCraft();
+        var lvType = pmp.LV?.GetLaunchVehicleType();
+        var scKey = scType?.ID.ToString() ?? scType?.NameRocketType ?? "no-sc";
+        var lvKey = lvType?.ID.ToString() ?? lvType?.Name ?? "no-lv";
+        return $"{pmp.FlyCompany.ID}|{source.id}->{target.id}|{pmp.TransferTypeMoonCase}|fast={pmp.TryFastAsPossible}|sc={scKey}|lv={lvKey}";
+    }
+
     private static void WriteLog(string level, string msg)
     {
         if (_logWriter == null)
@@ -276,19 +358,25 @@ public static class LogisticsObserver
         var fuelProbeCount = _returnFuelProbeCache.Count;
         var routeLockCount = _routePlanningLocks.Count;
         var committedCount = _committedStock.Count;
+        var throttleCount = _requestPlanThrottle.Count;
+        var precalcCount = _precalculateRouteCache.Count;
         _cycleCreatedAt.Clear();
         _cyclePlanningFailures.Clear();
         _pendingPlanningDeliveries.Clear();
         _returnHomeByShipId.Clear();
         _returnFuelProbeCache.Clear();
+        _returnFuelProbeCacheOrder.Clear();
         _routePlanningLocks.Clear();
         _committedStock.Clear();
+        _requestPlanThrottle.Clear();
+        _precalculateRouteCache.Clear();
+        _precalculateRouteCacheOrder.Clear();
         _cycleNameByShipId.Clear();
         _cycleNameByRouteKey.Clear();
-        _cachedLaunchVehicles = null;
         _cachedSpacecraft = null;
-        _nextTrajectoryMaintenanceScan = default;
-        Log($"RESET runtime-state: cycles={cycleCount} pending={pendingCount} returns={returnCount} failures={failCount} fuelProbes={fuelProbeCount} routeLocks={routeLockCount} committed={committedCount}");
+        _nextCompletedTrajectoryScan = default;
+        _nextOrphanTrajectoryScan = default;
+        Log($"RESET runtime-state: cycles={cycleCount} pending={pendingCount} returns={returnCount} failures={failCount} fuelProbes={fuelProbeCount} routeLocks={routeLockCount} committed={committedCount} throttles={throttleCount} precalc={precalcCount}");
     }
 
     public static bool IsLogisticsMissionInfo(MissionInfo mi)
@@ -409,6 +497,8 @@ public static class LogisticsObserver
                 return;
 
             LogVerbose($"CYCLE one-shot-complete: context={context} route={cmd.A?.ObjectName}->{cmd.B?.ObjectName} ship={sc.GetSpacecraftName()} id={sc.ID}");
+            foreach (var tabRes in cmd.cargoAllStart?.Tab ?? Array.Empty<ResourceDefinition>())
+                ClearPendingPlanningDelivery(cmd.B, tabRes);
             _cycleCreatedAt.Remove(cmd);
             _cyclePlanningFailures.Remove(cmd);
             RemoveLogisticsCycle(cm, cmd);
@@ -472,11 +562,15 @@ public static class LogisticsObserver
         snapshot.CommittedShipIds = committedShipIds;
         CleanupStaleUnlaunchedLogisticsMissions(player, snapshot);
         var now = MonoBehaviourSingleton<TimeController>.Instance?.CurrentTime ?? DateTime.Now;
-        if (_nextTrajectoryMaintenanceScan == default || now >= _nextTrajectoryMaintenanceScan)
+        if (_nextCompletedTrajectoryScan == default || now >= _nextCompletedTrajectoryScan)
         {
             CleanupCompletedLogisticsMissionTrajectories(player, snapshot);
+            _nextCompletedTrajectoryScan = now.AddDays(CompletedTrajectoryScanDays);
+        }
+        if (_nextOrphanTrajectoryScan == default || now >= _nextOrphanTrajectoryScan)
+        {
             CleanupOrphanLogisticsTrajectories(player, snapshot);
-            _nextTrajectoryMaintenanceScan = now.AddDays(TrajectoryMaintenanceScanDays);
+            _nextOrphanTrajectoryScan = now.AddDays(OrphanTrajectoryScanDays);
         }
 
         TryReturnIdleLogisticsShips(player, snapshot);
@@ -570,6 +664,8 @@ public static class LogisticsObserver
                 if (hasActiveDelivery)
                 {
                     req.status = Data.LogisticsRequestStatus.InProgress;
+                    if (IsTransientPlanningStatus(req.statusNote))
+                        req.statusNote = null;
                     LogVerbose($"REQ active-cycle-present: target={requesterOI?.ObjectName} rd={rd.ID}; checking whether additional cargo is still needed");
                 }
 
@@ -610,10 +706,27 @@ public static class LogisticsObserver
                     continue;
                 }
 
+                var planningSignature = BuildRequestPlanSignature(requesterOI, rd, requestTarget,
+                    alreadyThere, inFlight, hasActiveDelivery, blockedReturnNote, snapshot);
+                if (ShouldDeferRequestPlanning(requesterOI, rd, planningSignature, out var throttleStatus))
+                {
+                    req.status = hasActiveDelivery || !string.IsNullOrEmpty(blockedReturnNote)
+                        ? Data.LogisticsRequestStatus.InProgress
+                        : Data.LogisticsRequestStatus.Pending;
+                    req.statusNote = !string.IsNullOrEmpty(blockedReturnNote)
+                        ? $"{blockedReturnNote}; {throttleStatus}"
+                        : throttleStatus;
+                    continue;
+                }
+
                 req.status = hasActiveDelivery
                     ? Data.LogisticsRequestStatus.InProgress
                     : Data.LogisticsRequestStatus.Pending;
                 var pendingReason = TryCreateDeliveries(req, requesterOI, rd, remaining, player, snapshot);
+                if (string.IsNullOrEmpty(pendingReason))
+                    ClearRequestPlanningThrottle(requesterOI, rd);
+                else
+                    MarkRequestPlanningEvaluated(requesterOI, rd, planningSignature);
                 if ((req.status == Data.LogisticsRequestStatus.Pending || hasActiveDelivery) && !string.IsNullOrEmpty(pendingReason))
                     req.statusNote = !string.IsNullOrEmpty(blockedReturnNote)
                         ? $"{blockedReturnNote}; {pendingReason}"
@@ -897,6 +1010,72 @@ public static class LogisticsObserver
         return PendingDeliveryKey(requester, rd);
     }
 
+    private static string BuildRequestPlanSignature(ObjectInfo requester, ResourceDefinition rd,
+        double requestTarget, double alreadyThere, double inFlight, bool hasActiveDelivery,
+        string blockedReturnNote, PlannerSnapshot snapshot)
+    {
+        var cycleCount = snapshot?.Cycles?.Count ?? -1;
+        var missionCount = snapshot?.Missions?.Count ?? -1;
+        return $"{requester?.id ?? -1}:{rd?.ID ?? "null"}:" +
+               $"target={Math.Round(requestTarget, 1)}:" +
+               $"stock={Math.Round(alreadyThere, 1)}:" +
+               $"inflight={Math.Round(inFlight, 1)}:" +
+               $"active={hasActiveDelivery}:" +
+               $"blocked={!string.IsNullOrEmpty(blockedReturnNote)}:" +
+               $"cycles={cycleCount}:missions={missionCount}";
+    }
+
+    private static bool ShouldDeferRequestPlanning(ObjectInfo requester, ResourceDefinition rd,
+        string signature, out string statusNote)
+    {
+        statusNote = null;
+        var key = PendingDeliveryKey(requester, rd);
+        if (!_requestPlanThrottle.TryGetValue(key, out var state) || state == null)
+            return false;
+
+        if (!string.Equals(state.Signature, signature, StringComparison.Ordinal))
+        {
+            _requestPlanThrottle.Remove(key);
+            return false;
+        }
+
+        var currentTime = MonoBehaviourSingleton<TimeController>.Instance?.CurrentTime ?? DateTime.Now;
+        if (currentTime >= state.NextEvaluation)
+        {
+            _requestPlanThrottle.Remove(key);
+            return false;
+        }
+
+        var days = Math.Max(0.0, (state.NextEvaluation - currentTime).TotalDays);
+        statusNote = $"Waiting to re-check logistics options ({days:0.#}d)";
+        LogVerbose($"REQ throttle-skip: target={requester?.ObjectName} rd={rd?.ID} next={state.NextEvaluation:yyyy-MM-dd} days={days:0.#}");
+        return true;
+    }
+
+    private static void MarkRequestPlanningEvaluated(ObjectInfo requester, ResourceDefinition rd, string signature)
+    {
+        if (requester == null || rd == null || string.IsNullOrEmpty(signature)) return;
+
+        var currentTime = MonoBehaviourSingleton<TimeController>.Instance?.CurrentTime ?? DateTime.Now;
+        _requestPlanThrottle[PendingDeliveryKey(requester, rd)] = new RequestPlanThrottleState
+        {
+            Signature = signature,
+            NextEvaluation = currentTime.AddDays(RequestPlanThrottleDays)
+        };
+    }
+
+    private static void ClearRequestPlanningThrottle(ObjectInfo requester, ResourceDefinition rd)
+    {
+        _requestPlanThrottle.Remove(PendingDeliveryKey(requester, rd));
+    }
+
+    private static bool IsTransientPlanningStatus(string statusNote)
+    {
+        return !string.IsNullOrEmpty(statusNote)
+            && (statusNote.StartsWith("Planning mission", StringComparison.Ordinal)
+                || statusNote.StartsWith("Waiting to re-check logistics options", StringComparison.Ordinal));
+    }
+
     private static string RoutePlanningLockKey(ObjectInfo source, ObjectInfo target, ResourceDefinition rd, Company player)
     {
         return $"{player?.name ?? "null"}:{source?.id ?? -1}->{target?.id ?? -1}:{rd?.ID ?? "null"}";
@@ -1090,13 +1269,18 @@ public static class LogisticsObserver
     {
         if (requester == null || rd == null) return;
         ClearBlockedPlanningRetryCooldown(requester, rd);
-        _pendingPlanningDeliveries[PendingDeliveryKey(requester, rd)] =
+        var key = PendingDeliveryKey(requester, rd);
+        _requestPlanThrottle.Remove(key);
+        _pendingPlanningDeliveries[key] =
             MonoBehaviourSingleton<TimeController>.Instance?.CurrentTime ?? DateTime.Now;
     }
 
     private static void ClearPendingPlanningDelivery(ObjectInfo requester, ResourceDefinition rd)
     {
-        _pendingPlanningDeliveries.Remove(PendingDeliveryKey(requester, rd));
+        if (requester == null || rd == null) return;
+        var key = PendingDeliveryKey(requester, rd);
+        _pendingPlanningDeliveries.Remove(key);
+        _requestPlanThrottle.Remove(key);
     }
 
     private static bool IsCyclePastPlanningGrace(CycleMissionsData cmd)
@@ -2148,13 +2332,47 @@ public static class LogisticsObserver
         Spacecraft sc, Company player, LaunchVehicleType lvType)
     {
         var transfer = GetTransferTypeForSpacecraft(providerOI, sc);
+        var scType = sc?.spacecraftType ?? sc?.GetTypeSpaceCraft();
+        var fuelCapacity = scType == null || player == null ? 0 : scType.GetFuelCapacity(player);
+        var cargoCapacity = scType == null || player == null ? 0 : scType.GetCargoCapacity(player);
         return string.Join("|",
             player?.ID ?? "company",
             providerOI?.id.ToString() ?? "provider",
             requesterOI?.id.ToString() ?? "requester",
-            sc?.spacecraftType?.ID ?? sc?.spacecraftType?.NameRocketType ?? "sc",
+            scType?.ID ?? scType?.NameRocketType ?? "sc",
+            $"tank={Math.Round(fuelCapacity, 1)}",
+            $"cargo={Math.Round(cargoCapacity, 1)}",
             lvType?.ID ?? lvType?.Name ?? "no-lv",
-            transfer.ToString());
+            transfer.ToString(),
+            $"margin={ReturnFuelSafetyMultiplier():0.###}");
+    }
+
+    private static void StoreReturnFuelProbe(string key, ReturnFuelProbeState probe)
+    {
+        if (string.IsNullOrEmpty(key) || probe == null)
+            return;
+
+        if (!_returnFuelProbeCache.ContainsKey(key))
+            _returnFuelProbeCacheOrder.Enqueue(key);
+        _returnFuelProbeCache[key] = probe;
+
+        var attempts = 0;
+        while (_returnFuelProbeCache.Count > MaxReturnFuelProbeCacheEntries
+            && _returnFuelProbeCacheOrder.Count > 0
+            && attempts++ < MaxReturnFuelProbeCacheEntries * 2)
+        {
+            var evict = _returnFuelProbeCacheOrder.Dequeue();
+            if (!_returnFuelProbeCache.TryGetValue(evict, out var existing))
+                continue;
+            if (existing.Pending)
+            {
+                _returnFuelProbeCacheOrder.Enqueue(evict);
+                continue;
+            }
+
+            _returnFuelProbeCache.Remove(evict);
+            LogVerbose($"RETURNFUEL probe-cache-evict: key={evict}");
+        }
     }
 
     private static void StartAsyncReturnFuelProbe(string key, ObjectInfo providerOI, ObjectInfo requesterOI,
@@ -2174,7 +2392,7 @@ public static class LogisticsObserver
             RequestedAt = MonoBehaviourSingleton<TimeController>.Instance?.CurrentTime ?? DateTime.Now,
             FuelType = fuelType
         };
-        _returnFuelProbeCache[key] = probe;
+        StoreReturnFuelProbe(key, probe);
 
         var probeCargo = CargoAll.CreateCargoEmpty();
         var probeSpacecraft = new PlannerSpacecraftInfo(sc, requesterOI);
@@ -2192,6 +2410,7 @@ public static class LogisticsObserver
         var transfer = GetTransferTypeForSpacecraft(providerOI, sc);
         pmp.TryFastAsPossible = transfer == ETransferType.Fastest;
         pmp.ClickFastestButton = transfer == ETransferType.Fastest;
+        ApplyCachedPrecalculateData(pmp);
 
         if (VerboseLoggingEnabled)
             Log($"RETURNFUEL async-probe-start: key={key} returnRoute={requesterOI.ObjectName}->{providerOI.ObjectName} ship={sc.GetSpacecraftName()} scType={scType?.NameRocketType ?? "null"} probePos={probeSpacecraft.GetActualPosition()?.ObjectName ?? "null"} transfer={transfer} fuel={fuelType?.ID ?? "null"}");
@@ -2215,6 +2434,7 @@ public static class LogisticsObserver
             probe.RequiredReserve = requiredReserve;
             probe.Result = result;
             probe.FailureReason = result == PMMissionParameter.EPlanMissionResult.AllOk ? null : result.ToString();
+            CachePrecalculateData(pmp, "return-fuel-probe");
 
             if (VerboseLoggingEnabled)
                 Log($"RETURNFUEL async-probe-result: key={key} returnRoute={requesterOI.ObjectName}->{providerOI.ObjectName} ship={sc.GetSpacecraftName()} result={result} fuel={callbackFuelType?.ID ?? "null"} allFuel={pmp.AllFuelNeed:0.#} minFuel={pmp.MINFuelCost:0.#} fuelNeed={pmp.FuelNeed:0.#} leftOver={pmp.LeftOverFuel:0.#} reserve={requiredReserve:0.#} depart={pmp.DepartureTimeDate:yyyy-MM-dd} arrive={pmp.Arrival:yyyy-MM-dd}");
@@ -2415,7 +2635,7 @@ public static class LogisticsObserver
             state.ReturnRetryWallClockAfterUtc = DateTime.MinValue;
 
             state.HasLeftHome = true;
-            if (TrySetupReturnCycle(sc, current, home, player, state))
+            if (TrySetupReturnCycle(sc, current, home, player, state, snapshot))
                 continue;
         }
     }
@@ -2503,7 +2723,7 @@ public static class LogisticsObserver
         state.ReturnRetryWallClockAfterUtc = DateTime.MinValue;
     }
 
-    private static bool TrySetupReturnCycle(Spacecraft sc, ObjectInfo current, ObjectInfo home, Company player, ReturnHomeState state)
+    private static bool TrySetupReturnCycle(Spacecraft sc, ObjectInfo current, ObjectInfo home, Company player, ReturnHomeState state, PlannerSnapshot snapshot = null)
     {
         var cm = MonoBehaviourSingleton<CycleMissionManager>.Instance;
         if (sc == null || current == null || home == null || player == null || cm == null) return false;
@@ -2523,7 +2743,7 @@ public static class LogisticsObserver
         var needsLaunchVehicle = !currentIsOrbit && RequiresLaunchVehicleForSpacecraft(current, sc, player, 0);
         if (needsLaunchVehicle)
         {
-            var launchSupport = GetAvailableLaunchSupport(current, player);
+            var launchSupport = GetAvailableLaunchSupport(current, player, snapshot);
             returnLv = launchSupport
                 .Select(option => option.Vehicle)
                 .FirstOrDefault(lv => lv != null
@@ -2721,10 +2941,11 @@ public static class LogisticsObserver
         var routeTier = GetRouteTier(providerOI, requester);
         var routeDetail = VerboseLoggingEnabled ? DescribeRouteScore(providerOI, requester, routeTier) : null;
 
-        if (providerOI.NeedVehicleToLaunch())
+        var isSurfaceToOwnOrbit = IsOrbitOf(requester, providerOI);
+        if (providerOI.NeedVehicleToLaunch() && !isSurfaceToOwnOrbit)
         {
             var directSurfaceShip = FindBestIdleSpacecraft(providerOI, player, scActive,
-                requireNonContainer: !IsOrbitOf(requester, providerOI), out var directSurfaceShipReason);
+                requireNonContainer: true, out var directSurfaceShipReason);
             var directSurfaceCapacity = directSurfaceShip?.spacecraftType?.GetCargoCapacity(player) ?? 0;
             var directSurfaceAmount = Math.Min(amount, directSurfaceCapacity);
             if (directSurfaceShip != null && directSurfaceCapacity > 0)
@@ -2784,8 +3005,8 @@ public static class LogisticsObserver
             return;
         }
 
-        if (!TryFindSurfaceLaunch(providerOI, requester, player, scActive, lvActive, requireContainerOnly: IsOrbitOf(requester, providerOI),
-                requireRegularSC: !IsOrbitOf(requester, providerOI), out var lvType, out var carrier, out var launchReason, out var launchSupportDetail, out var launchSupportAdjustment, snapshot))
+        if (!TryFindSurfaceLaunch(providerOI, requester, player, scActive, lvActive, requireContainerOnly: isSurfaceToOwnOrbit,
+                requireRegularSC: !isSurfaceToOwnOrbit, out var lvType, out var carrier, out var launchReason, out var launchSupportDetail, out var launchSupportAdjustment, snapshot))
         {
             if (VerboseLoggingEnabled)
                 LogBepInEx($"ROUTE candidate-blocked: rd={rd.ID} kind={RouteKind.DirectSurfaceLaunch} label={providerOI.ObjectName} -> {requester.ObjectName} score={routeTier} detail={routeDetail} reason={launchReason}");
@@ -3241,15 +3462,9 @@ public static class LogisticsObserver
             }
         }
 
-        // Fallback: cached FindObjectsOfType catches facility-backed LVs (space elevators, etc.)
-        // that GetListLaunchVehicle may not return. Cached to avoid per-provider scene scan.
-        var now = Time.unscaledTime;
-        if (_cachedLaunchVehicles == null || now - _cachedLaunchVehiclesTime > 1f)
-        {
-            _cachedLaunchVehicles = UnityEngine.Object.FindObjectsOfType<LaunchVehicle>();
-            _cachedLaunchVehiclesTime = now;
-        }
-        foreach (var lv in _cachedLaunchVehicles)
+        // Fallback: inspect the body's own LV list instead of scanning the whole scene.
+        // Stock facility LVs are inserted into ObjectInfo.ListLaunchVehicle when their fake LV is created.
+        foreach (var lv in providerOI.ListLaunchVehicle)
         {
             if (lv == null || lv.launchVehicleType == null) continue;
             if (lv.GetCompany() != player) continue;

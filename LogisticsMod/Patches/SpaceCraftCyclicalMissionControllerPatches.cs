@@ -66,12 +66,15 @@ internal static class SpaceCraftCyclicalMissionControllerPatches
                 $"LOGI-CODEJOB prefix: sc={DescribeSpacecraft(_pmMissionParameter.SC)} " +
                 $"route={_pmMissionParameter.Start?.ObjectName ?? "null"}->{_pmMissionParameter.Target?.ObjectName ?? "null"}");
 
+        LogisticsObserver.ApplyCachedPrecalculateData(_pmMissionParameter);
+
         var original = result;
         result = () =>
         {
             RestoreLogisticsMissionName(_pmMissionParameter, "codejob");
             LogisticsObserver.CapLogisticsCargoForPlannerLimits(_pmMissionParameter);
             original?.Invoke();
+            LogisticsObserver.CachePrecalculateData(_pmMissionParameter, "codejob");
         };
     }
 
