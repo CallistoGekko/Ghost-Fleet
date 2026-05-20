@@ -147,10 +147,6 @@ public static class LogisticsObserver
         public List<CycleMissionsData> Cycles = new List<CycleMissionsData>();
         public List<MissionInfo> Missions = new List<MissionInfo>();
         public List<Spacecraft> Ships = new List<Spacecraft>();
-        public Dictionary<string, int> ScActive = new Dictionary<string, int>();
-        public Dictionary<string, int> LvActive = new Dictionary<string, int>();
-        public HashSet<int> CommittedShipIds = new HashSet<int>();
-        public Dictionary<int, List<LaunchSupportOption>> LaunchSupportByObjectId = new Dictionary<int, List<LaunchSupportOption>>();
     }
 
     private enum RouteKind
@@ -466,10 +462,6 @@ public static class LogisticsObserver
         var player = MonoBehaviourSingleton<GameManager>.Instance?.Player;
         if (player == null) return;
         var snapshot = BuildPlannerSnapshot(player);
-        CountActiveLogisticsCycles(player, snapshot.Cycles, out var scActive, out var lvActive, out var committedShipIds);
-        snapshot.ScActive = scActive;
-        snapshot.LvActive = lvActive;
-        snapshot.CommittedShipIds = committedShipIds;
         CleanupStaleUnlaunchedLogisticsMissions(player, snapshot);
         var now = MonoBehaviourSingleton<TimeController>.Instance?.CurrentTime ?? DateTime.Now;
         if (_nextTrajectoryMaintenanceScan == default || now >= _nextTrajectoryMaintenanceScan)
@@ -519,7 +511,7 @@ public static class LogisticsObserver
                             continue;
                         }
                         if (rd != null)
-                            CleanupLogisticsCyclesForRequest(requesterOI, rd, player, $"request-{req.status.ToString().ToLowerInvariant()}", snapshot);
+                            CleanupLogisticsCyclesForRequest(requesterOI, rd, player, $"request-{req.status.ToString().ToLowerInvariant()}");
                         req.statusNote = null;
                         continue;
                     }
@@ -551,18 +543,18 @@ public static class LogisticsObserver
                     if (req.status != Data.LogisticsRequestStatus.Satisfied)
                         Log($"SATISFIED: {rd.ID} on {requesterOI?.ObjectName} stock={alreadyThere:0.#} target={requestTarget:0.#}");
                     req.status = Data.LogisticsRequestStatus.Satisfied;
-                    CleanupLogisticsCyclesForRequest(requesterOI, rd, player, "request-fulfilled", snapshot);
+                    CleanupLogisticsCyclesForRequest(requesterOI, rd, player, "request-fulfilled");
                     continue;
                 }
 
-                if (HandleRelayProgress(req, requesterOI, rd, requestTarget, alreadyThere, player, snapshot))
+                if (HandleRelayProgress(req, requesterOI, rd, requestTarget, alreadyThere, player))
                     continue;
 
                 bool hasActiveDelivery = HasActiveCycleDelivering(requesterOI, rd, player, snapshot);
                 if (alreadyThere >= requestMinimum && !hasActiveDelivery && string.IsNullOrEmpty(blockedReturnNote))
                 {
                     req.status = Data.LogisticsRequestStatus.Satisfied;
-                    CleanupLogisticsCyclesForRequest(requesterOI, rd, player, "above-minimum", snapshot);
+                    CleanupLogisticsCyclesForRequest(requesterOI, rd, player, "above-minimum");
                     LogVerbose($"REQ hold-above-minimum: target={requesterOI?.ObjectName} rd={rd.ID} stock={alreadyThere:0.#} minimum={requestMinimum:0.#} fillTarget={requestTarget:0.#}");
                     continue;
                 }
@@ -625,7 +617,7 @@ public static class LogisticsObserver
     }
 
     private static bool HandleRelayProgress(Data.LogisticsRequest req, ObjectInfo requesterOI,
-        ResourceDefinition rd, double requestTarget, double alreadyThere, Company player, PlannerSnapshot snapshot = null)
+        ResourceDefinition rd, double requestTarget, double alreadyThere, Company player)
     {
         if (req == null || requesterOI == null || rd == null || player == null)
             return false;
@@ -643,7 +635,7 @@ public static class LogisticsObserver
 
         if (req.relayStage == Data.RelayStage.WaitingForSourceOrbitStock)
         {
-            if (HasActiveCycleDelivering(orbitOI, rd, player, snapshot) || HasPendingPlanningDelivery(orbitOI, rd))
+            if (HasActiveCycleDelivering(orbitOI, rd, player) || HasPendingPlanningDelivery(orbitOI, rd))
             {
                 req.status = Data.LogisticsRequestStatus.InProgress;
                 req.statusNote = LogisticsStrings.StagingTo(orbitOI);
@@ -664,7 +656,7 @@ public static class LogisticsObserver
             return false;
         }
 
-        var hasActiveFinalDelivery = HasActiveCycleDelivering(finalTargetOI, rd, player, snapshot);
+        var hasActiveFinalDelivery = HasActiveCycleDelivering(finalTargetOI, rd, player);
         if (HasPendingPlanningDelivery(finalTargetOI, rd))
         {
             req.status = Data.LogisticsRequestStatus.InProgress;
@@ -701,7 +693,7 @@ public static class LogisticsObserver
             return true;
         }
 
-        var usefulFinalLoad = GetUsefulRelayFinalLoad(orbitOI, rd, remaining, player, snapshot);
+        var usefulFinalLoad = GetUsefulRelayFinalLoad(orbitOI, rd, remaining, player);
         if (committedFromOrbit > 0 && stagedStock < usefulFinalLoad)
         {
             req.status = Data.LogisticsRequestStatus.InProgress;
@@ -716,7 +708,7 @@ public static class LogisticsObserver
             return false;
         }
 
-        if (TryCreateRelayFinalDelivery(req, finalTargetOI, orbitOI, rd, Math.Min(remaining, stagedStock), player, snapshot))
+        if (TryCreateRelayFinalDelivery(req, finalTargetOI, orbitOI, rd, Math.Min(remaining, stagedStock), player))
             return true;
 
         req.status = Data.LogisticsRequestStatus.InProgress;
@@ -724,13 +716,13 @@ public static class LogisticsObserver
         return true;
     }
 
-    private static double GetUsefulRelayFinalLoad(ObjectInfo sourceOrbit, ResourceDefinition rd, double remaining, Company player, PlannerSnapshot snapshot = null)
+    private static double GetUsefulRelayFinalLoad(ObjectInfo sourceOrbit, ResourceDefinition rd, double remaining, Company player)
     {
         if (sourceOrbit == null || rd == null || player == null || remaining <= 0)
             return 0;
 
-        var scActive = snapshot?.ScActive ?? new Dictionary<string, int>();
-        var carrier = FindBestIdleSpacecraft(sourceOrbit, player, scActive, requireNonContainer: true, out _, snapshot);
+        CountActiveLogisticsCycles(player, out var scActive, out _);
+        var carrier = FindBestIdleSpacecraft(sourceOrbit, player, scActive, requireNonContainer: true, out _);
         var capacity = carrier?.spacecraftType?.GetCargoCapacity(player) ?? 0;
         if (capacity <= 0)
             return 0;
@@ -814,7 +806,7 @@ public static class LogisticsObserver
         return Math.Max(0, Math.Min(req.minimumAmount, RequestTarget(req)));
     }
 
-    private static void CleanupLogisticsCyclesForRequest(ObjectInfo requester, ResourceDefinition rd, Company player, string reason, PlannerSnapshot snapshot = null)
+    private static void CleanupLogisticsCyclesForRequest(ObjectInfo requester, ResourceDefinition rd, Company player, string reason)
     {
         var cm = MonoBehaviourSingleton<CycleMissionManager>.Instance;
         if (cm == null || requester == null || rd == null || player == null) return;
@@ -827,7 +819,7 @@ public static class LogisticsObserver
                 ClearRelayState(req);
         }
 
-        foreach (var cmd in (snapshot?.Cycles ?? cm.GetAllCycleMission(player)).ToList())
+        foreach (var cmd in cm.GetAllCycleMission(player).ToList())
         {
             if (!IsLogisticsDeliveryMission(cmd)) continue;
             if (cmd.B != requester) continue;
@@ -1273,24 +1265,20 @@ public static class LogisticsObserver
     public static void GetActiveCycleCounts(Company player,
         out Dictionary<string, int> scActive, out Dictionary<string, int> lvActive)
     {
-        var cm = MonoBehaviourSingleton<CycleMissionManager>.Instance;
-        var cycles = cm?.GetAllCycleMission(player);
-        CountActiveLogisticsCycles(player, cycles, out scActive, out lvActive, out _);
+        CountActiveLogisticsCycles(player, out scActive, out lvActive);
     }
 
     private static void CountActiveLogisticsCycles(Company player,
-        IEnumerable<CycleMissionsData> cycles,
-        out Dictionary<string, int> scActive, out Dictionary<string, int> lvActive,
-        out HashSet<int> committedShipIds)
+        out Dictionary<string, int> scActive, out Dictionary<string, int> lvActive)
     {
         scActive = new Dictionary<string, int>();
         lvActive = new Dictionary<string, int>();
-        committedShipIds = new HashSet<int>();
-        if (cycles == null) return;
+        var cm = MonoBehaviourSingleton<CycleMissionManager>.Instance;
+        if (cm == null) return;
 
-        foreach (var cmd in cycles)
+        foreach (var cmd in cm.GetAllCycleMission(player))
         {
-            if (cmd == null || cmd.CheckComplete()) continue;
+            if (cmd.CheckComplete()) continue;
             if (!IsLogisticsMission(cmd)) continue;
             if (cmd.ListSC == null) continue;
 
@@ -1301,7 +1289,6 @@ public static class LogisticsObserver
                 var tn = Data.LogisticsNetwork.TypeKey(sc.spacecraftType.ID, sc.spacecraftType.NameRocketType ?? "SC");
                 if (!scActive.ContainsKey(tn)) scActive[tn] = 0;
                 scActive[tn]++;
-                committedShipIds.Add(sc.ID);
             }
 
             if (cmd.LvTypeA != null)
@@ -1316,24 +1303,6 @@ public static class LogisticsObserver
                 if (!lvActive.ContainsKey(tn)) lvActive[tn] = 0;
                 lvActive[tn]++;
             }
-        }
-    }
-
-    private static void RecordDispatchInSnapshot(PlannerSnapshot snapshot, Spacecraft sc, LaunchVehicleType lvType)
-    {
-        if (snapshot == null) return;
-        if (sc?.spacecraftType != null)
-        {
-            var tn = Data.LogisticsNetwork.TypeKey(sc.spacecraftType.ID, sc.spacecraftType.NameRocketType ?? "SC");
-            if (!snapshot.ScActive.ContainsKey(tn)) snapshot.ScActive[tn] = 0;
-            snapshot.ScActive[tn]++;
-            snapshot.CommittedShipIds.Add(sc.ID);
-        }
-        if (lvType != null)
-        {
-            var tn = Data.LogisticsNetwork.TypeKey(lvType.ID, lvType.Name ?? "LV");
-            if (!snapshot.LvActive.ContainsKey(tn)) snapshot.LvActive[tn] = 0;
-            snapshot.LvActive[tn]++;
         }
     }
 
@@ -1421,8 +1390,7 @@ public static class LogisticsObserver
         return true;
     }
 
-    private static bool IsSpacecraftAlreadyCommitted(Spacecraft sc, Company player, out string reason,
-        bool includeReturnReservation = true, HashSet<int> committedShipIds = null)
+    private static bool IsSpacecraftAlreadyCommitted(Spacecraft sc, Company player, out string reason, bool includeReturnReservation = true)
     {
         reason = null;
         if (sc == null)
@@ -1470,17 +1438,7 @@ public static class LogisticsObserver
             return true;
         }
 
-        // Use pre-built committed set when available (O(1) lookup),
-        // fall back to full cycle scan otherwise.
-        if (committedShipIds != null)
-        {
-            if (sc.ID >= 0 && committedShipIds.Contains(sc.ID))
-            {
-                reason = $"{DescribeSpacecraft(sc)} identity in committed-ship set";
-                return true;
-            }
-        }
-        else if (cm != null && player != null)
+        if (cm != null && player != null)
         {
             foreach (var cmd in cm.GetAllCycleMission(player))
             {
@@ -1501,9 +1459,9 @@ public static class LogisticsObserver
         return false;
     }
 
-    private static bool IsSpacecraftAvailableForLogistics(Spacecraft sc, Company player, HashSet<int> committedShipIds = null)
+    private static bool IsSpacecraftAvailableForLogistics(Spacecraft sc, Company player)
     {
-        return !IsSpacecraftAlreadyCommitted(sc, player, out _, committedShipIds: committedShipIds);
+        return !IsSpacecraftAlreadyCommitted(sc, player, out _);
     }
 
     private static bool ValidateSpacecraftForCycleCreation(Spacecraft sc, Company player, string context)
@@ -1645,8 +1603,6 @@ public static class LogisticsObserver
     public static void CapLogisticsCargoForPlannerLimits(PMMissionParameter pmp)
     {
         if (!IsLogisticsPlan(pmp) || pmp.CargoAll == null) return;
-        if (CanSkipPlannerCapCheckForSimpleLocLaunch(pmp))
-            return;
 
         var result = pmp.CheckCanPlanMission().planMissionResult;
         if (ApplySmallReservePropellant(pmp))
@@ -1719,37 +1675,6 @@ public static class LogisticsObserver
             LogWarning($"CAP planner cargo: no valid cargo amount found for {pmp.Start?.ObjectName} -> {pmp.Target?.ObjectName}; original={originalTotal:0.#}, result={result} - aborting cycle");
             AbortLogisticsCycle(pmp);
         }
-    }
-
-    private static bool CanSkipPlannerCapCheckForSimpleLocLaunch(PMMissionParameter pmp)
-    {
-        if (pmp == null || pmp.CargoAll == null || pmp.SC == null || pmp.Start == null || pmp.Target == null || pmp.FlyCompany == null)
-            return false;
-
-        var scType = pmp.SC.GetTypeSpaceCraft();
-        if (scType?.LowOrbitContainer != true)
-            return false;
-        if (pmp.LV == null)
-            return false;
-        if (!pmp.Start.NeedVehicleToLaunch() || !IsOrbitOf(pmp.Target, pmp.Start))
-            return false;
-
-        var capacity = scType.GetCargoCapacity(pmp.FlyCompany) * Math.Max(1, pmp.SCCount);
-        if (pmp.CargoAll.CargoCurrent > capacity + 0.001)
-            return false;
-
-        try
-        {
-            if (!pmp.LV.CheckMaximumPayload(pmp.CargoAll, pmp.SC))
-                return false;
-        }
-        catch
-        {
-            return false;
-        }
-
-        LogVerbose($"LOGI-CAP skip-simple-loc: {pmp.Start.ObjectName}->{pmp.Target.ObjectName} cargo={pmp.CargoAll.CargoCurrent:0.#}/{capacity:0.#} lv={pmp.LV.GetLaunchVehicleType()?.Name ?? "none"}");
-        return true;
     }
 
     private static void AbortLogisticsCycle(PMMissionParameter pmp)
@@ -2005,8 +1930,7 @@ public static class LogisticsObserver
                 LogVerbose($"RETURNFUEL estimate-pending: route={providerOI?.ObjectName}->{requesterOI?.ObjectName} ship={sc?.GetSpacecraftName() ?? "null"} scType={sc?.spacecraftType?.NameRocketType ?? "null"} rd={rd.ID} cargo={normalCargo:0.#} lv={lvType?.Name ?? "none"} manifest={FormatCargo(cargoAll)}");
                 return false;
             }
-            if (VerboseLoggingEnabled)
-                LogWarning($"RETURNFUEL estimate-skipped: route={providerOI?.ObjectName}->{requesterOI?.ObjectName} ship={sc?.GetSpacecraftName() ?? "null"} scType={sc?.spacecraftType?.NameRocketType ?? "null"} rd={rd.ID} cargo={normalCargo:0.#} lv={lvType?.Name ?? "none"} manifest={FormatCargo(cargoAll)}");
+            LogWarning($"RETURNFUEL estimate-skipped: route={providerOI?.ObjectName}->{requesterOI?.ObjectName} ship={sc?.GetSpacecraftName() ?? "null"} scType={sc?.spacecraftType?.NameRocketType ?? "null"} rd={rd.ID} cargo={normalCargo:0.#} lv={lvType?.Name ?? "none"} manifest={FormatCargo(cargoAll)}");
             normalCargo = CargoAmountFor(cargoAll, rd);
             return cargoAll.CargoCurrent > 0;
         }
@@ -2048,16 +1972,14 @@ public static class LogisticsObserver
         {
             blockedFuelType = fuelType;
             blockedFuelShortfall = remainingShortfall;
-            if (VerboseLoggingEnabled)
-                LogWarning($"RETURNFUEL plan-shortfall: route={providerOI?.ObjectName}->{requesterOI?.ObjectName} ship={sc?.spacecraftType?.NameRocketType} fuel={fuelType.ID} reserve={requiredReserve:0.#} destStock={destinationStock:0.#} providerFuel={providerFuelAvailable:0.#} fuelAdded={reserveFuelCargo:0.#} shortfall={remainingShortfall:0.#} manifest={FormatCargo(cargoAll)}");
+            LogWarning($"RETURNFUEL plan-shortfall: route={providerOI?.ObjectName}->{requesterOI?.ObjectName} ship={sc?.spacecraftType?.NameRocketType} fuel={fuelType.ID} reserve={requiredReserve:0.#} destStock={destinationStock:0.#} providerFuel={providerFuelAvailable:0.#} fuelAdded={reserveFuelCargo:0.#} shortfall={remainingShortfall:0.#} manifest={FormatCargo(cargoAll)}");
             return false;
         }
 
         normalCargo = CargoAmountFor(cargoAll, rd);
         if (normalCargo <= 0)
         {
-            if (VerboseLoggingEnabled)
-                LogWarning($"RETURNFUEL no-request-cargo-left: route={providerOI?.ObjectName}->{requesterOI?.ObjectName} rd={rd.ID} fuel={fuelType.ID} fuelAdded={reserveFuelCargo:0.#} reducedCargo={reduced:0.#} manifest={FormatCargo(cargoAll)}");
+            LogWarning($"RETURNFUEL no-request-cargo-left: route={providerOI?.ObjectName}->{requesterOI?.ObjectName} rd={rd.ID} fuel={fuelType.ID} fuelAdded={reserveFuelCargo:0.#} reducedCargo={reduced:0.#} manifest={FormatCargo(cargoAll)}");
             return false;
         }
         LogVerbose($"RETURNFUEL ship-reserve-manifest: route={providerOI?.ObjectName}->{requesterOI?.ObjectName} ship={sc?.GetSpacecraftName() ?? "null"} scType={sc?.spacecraftType?.NameRocketType} fuel={fuelType.ID} reserve={requiredReserve:0.#} destStock={destinationStock:0.#} fuelAdded={reserveFuelCargo:0.#} reducedCargo={reduced:0.#} normalCargo={normalCargo:0.#} manifest={FormatCargo(cargoAll)}");
@@ -2096,8 +2018,7 @@ public static class LogisticsObserver
 
         if (providerOI == null || requesterOI == null || sc == null || player == null || cargoAll == null)
         {
-            if (VerboseLoggingEnabled)
-                LogWarning($"RETURNFUEL probe-skip: missing-input provider={providerOI?.ObjectName ?? "null"} requester={requesterOI?.ObjectName ?? "null"} ship={sc?.GetSpacecraftName() ?? "null"} player={player?.name ?? "null"} cargo={(cargoAll == null ? "null" : FormatCargo(cargoAll))}");
+            LogWarning($"RETURNFUEL probe-skip: missing-input provider={providerOI?.ObjectName ?? "null"} requester={requesterOI?.ObjectName ?? "null"} ship={sc?.GetSpacecraftName() ?? "null"} player={player?.name ?? "null"} cargo={(cargoAll == null ? "null" : FormatCargo(cargoAll))}");
             return false;
         }
 
@@ -2124,8 +2045,7 @@ public static class LogisticsObserver
 
         if (probe.FuelType == null)
         {
-            if (VerboseLoggingEnabled)
-                LogWarning($"RETURNFUEL probe-no-fueltype-cached: returnRoute={requesterOI.ObjectName}->{providerOI.ObjectName} ship={sc.GetSpacecraftName()} scType={scType.NameRocketType} lv={lvType?.Name ?? "none"} result={probe.Result} failure={probe.FailureReason ?? "none"}");
+            LogWarning($"RETURNFUEL probe-no-fueltype-cached: returnRoute={requesterOI.ObjectName}->{providerOI.ObjectName} ship={sc.GetSpacecraftName()} scType={scType.NameRocketType} lv={lvType?.Name ?? "none"} result={probe.Result} failure={probe.FailureReason ?? "none"}");
             return false;
         }
 
@@ -2138,8 +2058,7 @@ public static class LogisticsObserver
             var fallbackReserve = Math.Ceiling(scType.GetCargoCapacity(player) * MaxReturnFuelCargoDisplacementFraction);
             requiredReserve = fallbackReserve;
             destinationStock = 0;
-            if (VerboseLoggingEnabled)
-                LogWarning($"RETURNFUEL probe-zero-reserve-fallback: returnRoute={requesterOI.ObjectName}->{providerOI.ObjectName} ship={sc.GetSpacecraftName()} scType={scType.NameRocketType} lv={lvType?.Name ?? "none"} result={probe.Result} fuel={fuelType.ID} allFuel={probe.AllFuelNeed:0.#} minFuel={probe.MinFuelCost:0.#} fallbackReserve={fallbackReserve:0.#}");
+            LogWarning($"RETURNFUEL probe-zero-reserve-fallback: returnRoute={requesterOI.ObjectName}->{providerOI.ObjectName} ship={sc.GetSpacecraftName()} scType={scType.NameRocketType} lv={lvType?.Name ?? "none"} result={probe.Result} fuel={fuelType.ID} allFuel={probe.AllFuelNeed:0.#} minFuel={probe.MinFuelCost:0.#} fallbackReserve={fallbackReserve:0.#}");
         }
         return requiredReserve > 0;
     }
@@ -2193,8 +2112,7 @@ public static class LogisticsObserver
         pmp.TryFastAsPossible = transfer == ETransferType.Fastest;
         pmp.ClickFastestButton = transfer == ETransferType.Fastest;
 
-        if (VerboseLoggingEnabled)
-            Log($"RETURNFUEL async-probe-start: key={key} returnRoute={requesterOI.ObjectName}->{providerOI.ObjectName} ship={sc.GetSpacecraftName()} scType={scType?.NameRocketType ?? "null"} probePos={probeSpacecraft.GetActualPosition()?.ObjectName ?? "null"} transfer={transfer} fuel={fuelType?.ID ?? "null"}");
+        Log($"RETURNFUEL async-probe-start: key={key} returnRoute={requesterOI.ObjectName}->{providerOI.ObjectName} ship={sc.GetSpacecraftName()} scType={scType?.NameRocketType ?? "null"} probePos={probeSpacecraft.GetActualPosition()?.ObjectName ?? "null"} transfer={transfer} fuel={fuelType?.ID ?? "null"}");
         MonoBehaviourSingleton<GameManager>.Instance.SetPMParameterForCodeJobSystem(pmp, () =>
         {
             var result = pmp.CheckCanPlanMission().planMissionResult;
@@ -2216,8 +2134,7 @@ public static class LogisticsObserver
             probe.Result = result;
             probe.FailureReason = result == PMMissionParameter.EPlanMissionResult.AllOk ? null : result.ToString();
 
-            if (VerboseLoggingEnabled)
-                Log($"RETURNFUEL async-probe-result: key={key} returnRoute={requesterOI.ObjectName}->{providerOI.ObjectName} ship={sc.GetSpacecraftName()} result={result} fuel={callbackFuelType?.ID ?? "null"} allFuel={pmp.AllFuelNeed:0.#} minFuel={pmp.MINFuelCost:0.#} fuelNeed={pmp.FuelNeed:0.#} leftOver={pmp.LeftOverFuel:0.#} reserve={requiredReserve:0.#} depart={pmp.DepartureTimeDate:yyyy-MM-dd} arrive={pmp.Arrival:yyyy-MM-dd}");
+            Log($"RETURNFUEL async-probe-result: key={key} returnRoute={requesterOI.ObjectName}->{providerOI.ObjectName} ship={sc.GetSpacecraftName()} result={result} fuel={callbackFuelType?.ID ?? "null"} allFuel={pmp.AllFuelNeed:0.#} minFuel={pmp.MINFuelCost:0.#} fuelNeed={pmp.FuelNeed:0.#} leftOver={pmp.LeftOverFuel:0.#} reserve={requiredReserve:0.#} depart={pmp.DepartureTimeDate:yyyy-MM-dd} arrive={pmp.Arrival:yyyy-MM-dd}");
         });
     }
 
@@ -2249,8 +2166,7 @@ public static class LogisticsObserver
         var fuelToAdd = Math.Min(shortfall, providerFuelAvailable);
         if (fuelToAdd <= 0)
         {
-            if (VerboseLoggingEnabled)
-                LogWarning($"RETURNFUEL plan-shortfall: route={pmp.Start?.ObjectName}->{pmp.Target?.ObjectName} ship={scType.NameRocketType} fuel={fuelType.ID} allFuel={pmp.AllFuelNeed:0.#} minFuel={pmp.MINFuelCost:0.#} estimated={estimatedReturnFuel:0.#} reserve={requiredReserve:0.#} destStock={destinationStock:0.#} shortfall={shortfall:0.#} providerFuel={providerFuelAvailable:0.#}");
+            LogWarning($"RETURNFUEL plan-shortfall: route={pmp.Start?.ObjectName}->{pmp.Target?.ObjectName} ship={scType.NameRocketType} fuel={fuelType.ID} allFuel={pmp.AllFuelNeed:0.#} minFuel={pmp.MINFuelCost:0.#} estimated={estimatedReturnFuel:0.#} reserve={requiredReserve:0.#} destStock={destinationStock:0.#} shortfall={shortfall:0.#} providerFuel={providerFuelAvailable:0.#}");
             return;
         }
 
@@ -2259,8 +2175,7 @@ public static class LogisticsObserver
         fuelToAdd = Math.Min(fuelToAdd, maxAdditionalFuelCargo);
         if (fuelToAdd <= 0)
         {
-            if (VerboseLoggingEnabled)
-                LogWarning($"RETURNFUEL plan-cap-reached: route={pmp.Start?.ObjectName}->{pmp.Target?.ObjectName} ship={scType.NameRocketType} fuel={fuelType.ID} reserve={requiredReserve:0.#} maxFuelCargo={maxFuelCargo:0.#} existingFuelCargo={existingFuelCargo:0.#} manifest={FormatCargo(pmp.CargoAll)}");
+            LogWarning($"RETURNFUEL plan-cap-reached: route={pmp.Start?.ObjectName}->{pmp.Target?.ObjectName} ship={scType.NameRocketType} fuel={fuelType.ID} reserve={requiredReserve:0.#} maxFuelCargo={maxFuelCargo:0.#} existingFuelCargo={existingFuelCargo:0.#} manifest={FormatCargo(pmp.CargoAll)}");
             return;
         }
 
@@ -2276,8 +2191,7 @@ public static class LogisticsObserver
         fuelToAdd = Math.Min(fuelToAdd, freeCapacity);
         if (fuelToAdd <= 0)
         {
-            if (VerboseLoggingEnabled)
-                LogWarning($"RETURNFUEL plan-defer-no-room: route={pmp.Start?.ObjectName}->{pmp.Target?.ObjectName} ship={scType.NameRocketType} fuel={fuelType.ID} reserve={requiredReserve:0.#} capacity={capacity:0.#} reducedCargo={reduced:0.#} manifest={FormatCargo(pmp.CargoAll)}");
+            LogWarning($"RETURNFUEL plan-defer-no-room: route={pmp.Start?.ObjectName}->{pmp.Target?.ObjectName} ship={scType.NameRocketType} fuel={fuelType.ID} reserve={requiredReserve:0.#} capacity={capacity:0.#} reducedCargo={reduced:0.#} manifest={FormatCargo(pmp.CargoAll)}");
             return;
         }
 
@@ -2633,8 +2547,7 @@ public static class LogisticsObserver
         if (HasBlockedPlanningRetryCooldown(requester, rd, out var cooldownStatus))
             return cooldownStatus;
 
-        var scActive = snapshot?.ScActive ?? new Dictionary<string, int>();
-        var lvActive = snapshot?.LvActive ?? new Dictionary<string, int>();
+        CountActiveLogisticsCycles(player, out var scActive, out var lvActive);
         LogVerbose($"DISPATCH begin: target={requester?.ObjectName} rd={rd.ID} remaining={remaining:0.#} activeSC={FormatCounts(scActive)} activeLV={FormatCounts(lvActive)}");
         var bestBlocker = new PlannerBlocker();
         var candidates = BuildRouteCandidates(req, requester, rd, remaining, player, scActive, lvActive, bestBlocker, snapshot);
@@ -2662,18 +2575,15 @@ public static class LogisticsObserver
             .ThenBy(c => c.Provider?.id ?? int.MaxValue)
             .ToList();
 
-        if (VerboseLoggingEnabled)
-            LogBepInEx($"ROUTE request: target={requester?.ObjectName} rd={rd.ID} remaining={remaining:0.#} candidates={orderedCandidates.Count}");
+        LogBepInEx($"ROUTE request: target={requester?.ObjectName} rd={rd.ID} remaining={remaining:0.#} candidates={orderedCandidates.Count}");
         foreach (var candidate in orderedCandidates)
         {
-            if (VerboseLoggingEnabled)
-                LogBepInEx($"ROUTE candidate: rd={rd.ID} kind={candidate.Kind} label={candidate.Label} score={candidate.Tier} usesLV={candidate.UsesLV} hops={candidate.HopCount} available={candidate.Available:0.#} amount={candidate.Amount:0.#} detail={candidate.ScoreBreakdown}");
-            if (ExecuteRouteCandidate(candidate, req, requester, rd, player, snapshot))
+            LogBepInEx($"ROUTE candidate: rd={rd.ID} kind={candidate.Kind} label={candidate.Label} score={candidate.Tier} usesLV={candidate.UsesLV} hops={candidate.HopCount} available={candidate.Available:0.#} amount={candidate.Amount:0.#} detail={candidate.ScoreBreakdown}");
+            if (ExecuteRouteCandidate(candidate, req, requester, rd, player))
                 return null;
         }
         var executeReason = bestBlocker.Reason ?? "all candidates failed during execution";
-        if (VerboseLoggingEnabled)
-            LogBepInEx($"ROUTE no-execute: target={requester?.ObjectName} rd={rd.ID} reason={executeReason}");
+        LogBepInEx($"ROUTE no-execute: target={requester?.ObjectName} rd={rd.ID} reason={executeReason}");
         MarkBlockedPlanningRetryCooldown(requester, rd, executeReason);
         return executeReason;
     }
@@ -2700,26 +2610,25 @@ public static class LogisticsObserver
                 var noSurplusTier = GetRouteTier(providerOI, requester);
                 var noSurplusDetail = DescribeRouteScore(providerOI, requester, noSurplusTier);
                 var noSurplusReason = LogisticsStrings.NoSurplusAt(rd, providerOI);
-                if (VerboseLoggingEnabled)
-                    LogBepInEx($"ROUTE provider-skip: provider={providerOI?.ObjectName} rd={rd.ID} score={noSurplusTier} detail={noSurplusDetail} reason={noSurplusReason}");
+                LogBepInEx($"ROUTE provider-skip: provider={providerOI?.ObjectName} rd={rd.ID} score={noSurplusTier} detail={noSurplusDetail} reason={noSurplusReason}");
                 TrackPlannerBlocker(bestBlocker, noSurplusTier, 6, noSurplusReason);
                 continue;
             }
 
-            AddDirectRouteCandidates(result, providerOI, requester, rd, remaining, available, player, scActive, lvActive, bestBlocker, snapshot);
-            AddStagedRouteCandidate(result, providerOI, requester, rd, remaining, available, player, scActive, lvActive, bestBlocker, snapshot);
+            AddDirectRouteCandidates(result, providerOI, requester, rd, remaining, available, player, scActive, lvActive, bestBlocker);
+            AddStagedRouteCandidate(result, providerOI, requester, rd, remaining, available, player, scActive, lvActive, bestBlocker);
         }
         return result;
     }
 
     private static void AddDirectRouteCandidates(List<RouteCandidate> result, ObjectInfo providerOI,
         ObjectInfo requester, ResourceDefinition rd, double remaining, double available, Company player,
-        Dictionary<string, int> scActive, Dictionary<string, int> lvActive, PlannerBlocker bestBlocker, PlannerSnapshot snapshot = null)
+        Dictionary<string, int> scActive, Dictionary<string, int> lvActive, PlannerBlocker bestBlocker)
     {
         var amount = Math.Min(available, remaining);
         if (amount <= 0) return;
         var routeTier = GetRouteTier(providerOI, requester);
-        var routeDetail = VerboseLoggingEnabled ? DescribeRouteScore(providerOI, requester, routeTier) : null;
+        var routeDetail = DescribeRouteScore(providerOI, requester, routeTier);
 
         if (providerOI.NeedVehicleToLaunch())
         {
@@ -2777,31 +2686,28 @@ public static class LogisticsObserver
             }
             else if (!string.IsNullOrEmpty(spacecraftReason))
             {
-                if (VerboseLoggingEnabled)
-                    LogBepInEx($"ROUTE candidate-blocked: rd={rd.ID} kind={RouteKind.DirectSpacecraft} label={providerOI.ObjectName} -> {requester.ObjectName} score={routeTier} detail={routeDetail} reason={spacecraftReason}");
+                LogBepInEx($"ROUTE candidate-blocked: rd={rd.ID} kind={RouteKind.DirectSpacecraft} label={providerOI.ObjectName} -> {requester.ObjectName} score={routeTier} detail={routeDetail} reason={spacecraftReason}");
                 TrackPlannerBlocker(bestBlocker, routeTier, 3, spacecraftReason);
             }
             return;
         }
 
         if (!TryFindSurfaceLaunch(providerOI, requester, player, scActive, lvActive, requireContainerOnly: IsOrbitOf(requester, providerOI),
-                requireRegularSC: !IsOrbitOf(requester, providerOI), out var lvType, out var carrier, out var launchReason, out var launchSupportDetail, out var launchSupportAdjustment, snapshot))
+                requireRegularSC: !IsOrbitOf(requester, providerOI), out var lvType, out var carrier, out var launchReason, out var launchSupportDetail, out var launchSupportAdjustment))
         {
-            if (VerboseLoggingEnabled)
-                LogBepInEx($"ROUTE candidate-blocked: rd={rd.ID} kind={RouteKind.DirectSurfaceLaunch} label={providerOI.ObjectName} -> {requester.ObjectName} score={routeTier} detail={routeDetail} reason={launchReason}");
+            LogBepInEx($"ROUTE candidate-blocked: rd={rd.ID} kind={RouteKind.DirectSurfaceLaunch} label={providerOI.ObjectName} -> {requester.ObjectName} score={routeTier} detail={routeDetail} reason={launchReason}");
             TrackPlannerBlocker(bestBlocker, routeTier, 2, launchReason);
             return;
         }
 
         routeTier += launchSupportAdjustment;
-        routeDetail = VerboseLoggingEnabled ? DescribeRouteScore(providerOI, requester, routeTier, launchSupportAdjustment) : null;
+        routeDetail = DescribeRouteScore(providerOI, requester, routeTier, launchSupportAdjustment);
 
         var scCapacity = carrier?.spacecraftType?.GetCargoCapacity(player) ?? 0;
         if (scCapacity <= 0)
         {
             var capacityReason = LogisticsStrings.NoCargoCapacityFrom(providerOI);
-            if (VerboseLoggingEnabled)
-                LogBepInEx($"ROUTE candidate-blocked: rd={rd.ID} kind={RouteKind.DirectSurfaceLaunch} label={providerOI.ObjectName} -> {requester.ObjectName} score={routeTier} detail={routeDetail} reason={capacityReason}");
+            LogBepInEx($"ROUTE candidate-blocked: rd={rd.ID} kind={RouteKind.DirectSurfaceLaunch} label={providerOI.ObjectName} -> {requester.ObjectName} score={routeTier} detail={routeDetail} reason={capacityReason}");
             TrackPlannerBlocker(bestBlocker, routeTier, 4, capacityReason);
             return;
         }
@@ -2825,7 +2731,7 @@ public static class LogisticsObserver
 
     private static void AddStagedRouteCandidate(List<RouteCandidate> result, ObjectInfo providerOI,
         ObjectInfo requester, ResourceDefinition rd, double remaining, double available, Company player,
-        Dictionary<string, int> scActive, Dictionary<string, int> lvActive, PlannerBlocker bestBlocker, PlannerSnapshot snapshot = null)
+        Dictionary<string, int> scActive, Dictionary<string, int> lvActive, PlannerBlocker bestBlocker)
     {
         if (!providerOI.NeedVehicleToLaunch()) return;
         if (requester == null || providerOI == null) return;
@@ -2835,25 +2741,23 @@ public static class LogisticsObserver
         if (sourceOrbit == null)
         {
             var noOrbitReason = LogisticsStrings.NoSourceOrbitAt(providerOI);
-            if (VerboseLoggingEnabled)
-                LogBepInEx($"ROUTE candidate-blocked: rd={rd.ID} kind={RouteKind.StageSourceSurfaceToOrbit} label={providerOI.ObjectName} -> [orbit missing] -> {requester.ObjectName} score=5 detail=no-source-orbit reason={noOrbitReason}");
+            LogBepInEx($"ROUTE candidate-blocked: rd={rd.ID} kind={RouteKind.StageSourceSurfaceToOrbit} label={providerOI.ObjectName} -> [orbit missing] -> {requester.ObjectName} score=5 detail=no-source-orbit reason={noOrbitReason}");
             TrackPlannerBlocker(bestBlocker, 5, 5, noOrbitReason);
             return;
         }
         var routeTier = GetRouteTier(sourceOrbit, requester);
-        var routeDetail = VerboseLoggingEnabled ? DescribeRouteScore(sourceOrbit, requester, routeTier) : null;
+        var routeDetail = DescribeRouteScore(sourceOrbit, requester, routeTier);
 
         if (!TryFindSurfaceLaunch(providerOI, sourceOrbit, player, scActive, lvActive, requireContainerOnly: true,
-                requireRegularSC: false, out var stageLvType, out var stageCarrier, out var stageReason, out var stageSupportDetail, out var stageSupportAdjustment, snapshot))
+                requireRegularSC: false, out var stageLvType, out var stageCarrier, out var stageReason, out var stageSupportDetail, out var stageSupportAdjustment))
         {
-            if (VerboseLoggingEnabled)
-                LogBepInEx($"ROUTE candidate-blocked: rd={rd.ID} kind={RouteKind.StageSourceSurfaceToOrbit} label={providerOI.ObjectName} -> {sourceOrbit.ObjectName} -> {requester.ObjectName} score={routeTier} detail={routeDetail} reason={stageReason}");
+            LogBepInEx($"ROUTE candidate-blocked: rd={rd.ID} kind={RouteKind.StageSourceSurfaceToOrbit} label={providerOI.ObjectName} -> {sourceOrbit.ObjectName} -> {requester.ObjectName} score={routeTier} detail={routeDetail} reason={stageReason}");
             TrackPlannerBlocker(bestBlocker, routeTier, 2, stageReason);
             return;
         }
 
         routeTier += stageSupportAdjustment;
-        routeDetail = VerboseLoggingEnabled ? DescribeRouteScore(sourceOrbit, requester, routeTier, stageSupportAdjustment) : null;
+        routeDetail = DescribeRouteScore(sourceOrbit, requester, routeTier, stageSupportAdjustment);
 
         var finalCarrier = FindBestIdleSpacecraft(sourceOrbit, player, scActive, requireNonContainer: true,
             out var finalCarrierReason);
@@ -2862,16 +2766,14 @@ public static class LogisticsObserver
         if (stageCapacity <= 0)
         {
             var stageCapacityReason = LogisticsStrings.NoOrbitalPayloadCapacityFrom(providerOI);
-            if (VerboseLoggingEnabled)
-                LogBepInEx($"ROUTE candidate-blocked: rd={rd.ID} kind={RouteKind.StageSourceSurfaceToOrbit} label={providerOI.ObjectName} -> {sourceOrbit.ObjectName} -> {requester.ObjectName} score={routeTier} detail={routeDetail} reason={stageCapacityReason}");
+            LogBepInEx($"ROUTE candidate-blocked: rd={rd.ID} kind={RouteKind.StageSourceSurfaceToOrbit} label={providerOI.ObjectName} -> {sourceOrbit.ObjectName} -> {requester.ObjectName} score={routeTier} detail={routeDetail} reason={stageCapacityReason}");
             TrackPlannerBlocker(bestBlocker, routeTier, 4, stageCapacityReason);
             return;
         }
         if (finalCapacity <= 0)
         {
             var finalReason = finalCarrierReason ?? LogisticsStrings.NoSpacecraftAvailableAt(sourceOrbit);
-            if (VerboseLoggingEnabled)
-                LogBepInEx($"ROUTE candidate-blocked: rd={rd.ID} kind={RouteKind.StageSourceSurfaceToOrbit} label={providerOI.ObjectName} -> {sourceOrbit.ObjectName} -> {requester.ObjectName} score={routeTier} detail={routeDetail} reason={finalReason}");
+            LogBepInEx($"ROUTE candidate-blocked: rd={rd.ID} kind={RouteKind.StageSourceSurfaceToOrbit} label={providerOI.ObjectName} -> {sourceOrbit.ObjectName} -> {requester.ObjectName} score={routeTier} detail={routeDetail} reason={finalReason}");
             var priority = IsNoLogisticsDataReason(finalReason) ? 9 : 3;
             TrackPlannerBlocker(bestBlocker, routeTier, priority, finalReason);
             return;
@@ -2900,7 +2802,7 @@ public static class LogisticsObserver
     }
 
     private static bool ExecuteRouteCandidate(RouteCandidate candidate, Data.LogisticsRequest req,
-        ObjectInfo requester, ResourceDefinition rd, Company player, PlannerSnapshot snapshot = null)
+        ObjectInfo requester, ResourceDefinition rd, Company player)
     {
         if (candidate == null || req == null || requester == null || rd == null || player == null)
             return false;
@@ -2911,13 +2813,9 @@ public static class LogisticsObserver
                 if (SetupDirectCycleMission(req, candidate.Spacecraft, rd, candidate.Amount, requester, candidate.Provider,
                         out var blockedFuelType, out var blockedFuelShortfall))
                 {
-                    RecordDispatchInSnapshot(snapshot, candidate.Spacecraft, null);
                     ClearRelayState(req);
-                    if (VerboseLoggingEnabled)
-                    {
-                        Log($"PROC ranked: {rd.ID} x{candidate.Amount:0.#} {candidate.Label} kind={candidate.Kind}");
-                        LogBepInEx($"ROUTE chosen: rd={rd.ID} kind={candidate.Kind} label={candidate.Label} score={candidate.Tier} detail={candidate.ScoreBreakdown}");
-                    }
+                    Log($"PROC ranked: {rd.ID} x{candidate.Amount:0.#} {candidate.Label} kind={candidate.Kind}");
+                    LogBepInEx($"ROUTE chosen: rd={rd.ID} kind={candidate.Kind} label={candidate.Label} score={candidate.Tier} detail={candidate.ScoreBreakdown}");
                     return true;
                 }
                 if (IsWaitingForReturnFuelProbe(req))
@@ -2932,13 +2830,9 @@ public static class LogisticsObserver
                 if (SetupCycleMission(req, candidate.Spacecraft, rd, candidate.Amount, requester, candidate.Provider,
                         candidate.LaunchVehicleType, out blockedFuelType, out blockedFuelShortfall))
                 {
-                    RecordDispatchInSnapshot(snapshot, candidate.Spacecraft, candidate.LaunchVehicleType);
                     ClearRelayState(req);
-                    if (VerboseLoggingEnabled)
-                    {
-                        Log($"PROC ranked: {rd.ID} x{candidate.Amount:0.#} {candidate.Label} kind={candidate.Kind}");
-                        LogBepInEx($"ROUTE chosen: rd={rd.ID} kind={candidate.Kind} label={candidate.Label} score={candidate.Tier} detail={candidate.ScoreBreakdown}");
-                    }
+                    Log($"PROC ranked: {rd.ID} x{candidate.Amount:0.#} {candidate.Label} kind={candidate.Kind}");
+                    LogBepInEx($"ROUTE chosen: rd={rd.ID} kind={candidate.Kind} label={candidate.Label} score={candidate.Tier} detail={candidate.ScoreBreakdown}");
                     return true;
                 }
                 if (IsWaitingForReturnFuelProbe(req))
@@ -2955,14 +2849,10 @@ public static class LogisticsObserver
                         candidate.LaunchVehicleType, out blockedFuelType, out blockedFuelShortfall,
                         accountingTargetOI: requester, pendingTargetOI: candidate.StageOrbit))
                 {
-                    RecordDispatchInSnapshot(snapshot, candidate.StageCarrier, candidate.LaunchVehicleType);
                     req.status = Data.LogisticsRequestStatus.InProgress;
                     req.statusNote = LogisticsStrings.StagingTo(candidate.StageOrbit);
-                    if (VerboseLoggingEnabled)
-                    {
-                        Log($"PROC ranked: {rd.ID} x{candidate.Amount:0.#} {candidate.Label} kind={candidate.Kind}");
-                        LogBepInEx($"ROUTE chosen: rd={rd.ID} kind={candidate.Kind} label={candidate.Label} score={candidate.Tier} detail={candidate.ScoreBreakdown}");
-                    }
+                    Log($"PROC ranked: {rd.ID} x{candidate.Amount:0.#} {candidate.Label} kind={candidate.Kind}");
+                    LogBepInEx($"ROUTE chosen: rd={rd.ID} kind={candidate.Kind} label={candidate.Label} score={candidate.Tier} detail={candidate.ScoreBreakdown}");
                     return true;
                 }
 
@@ -2976,7 +2866,7 @@ public static class LogisticsObserver
     }
 
     private static bool TryCreateRelayFinalDelivery(Data.LogisticsRequest req, ObjectInfo requester,
-        ObjectInfo sourceOrbit, ResourceDefinition rd, double remaining, Company player, PlannerSnapshot snapshot = null)
+        ObjectInfo sourceOrbit, ResourceDefinition rd, double remaining, Company player)
     {
         if (HasRoutePlanningLock(sourceOrbit, requester, rd, player, out var lockStatus))
         {
@@ -2985,8 +2875,8 @@ public static class LogisticsObserver
             return true;
         }
 
-        var scActive = snapshot?.ScActive ?? new Dictionary<string, int>();
-        var carrier = FindBestIdleSpacecraft(sourceOrbit, player, scActive, requireNonContainer: true, out _, snapshot);
+        CountActiveLogisticsCycles(player, out var scActive, out _);
+        var carrier = FindBestIdleSpacecraft(sourceOrbit, player, scActive, requireNonContainer: true, out _);
         var cap = carrier?.spacecraftType?.GetCargoCapacity(player) ?? 0;
         if (carrier == null || cap <= 0)
             return false;
@@ -3004,7 +2894,6 @@ public static class LogisticsObserver
             return TryCreateFuelBootstrapDelivery(req, sourceOrbit, rd, blockedFuelType, blockedFuelShortfall, player);
         }
 
-        RecordDispatchInSnapshot(snapshot, carrier, null);
         req.relayStage = Data.RelayStage.WaitingForFinalLeg;
         req.status = Data.LogisticsRequestStatus.InProgress;
         req.statusNote = LogisticsStrings.ShippingFrom(sourceOrbit);
@@ -3020,7 +2909,7 @@ public static class LogisticsObserver
     }
 
     private static Spacecraft FindBestIdleSpacecraft(ObjectInfo location, Company player,
-        Dictionary<string, int> scActive, bool requireNonContainer, out string reason, PlannerSnapshot snapshot = null)
+        Dictionary<string, int> scActive, bool requireNonContainer, out string reason)
     {
         reason = null;
         if (location == null || player == null) return null;
@@ -3038,10 +2927,8 @@ public static class LogisticsObserver
             return null;
         }
 
-        var ships = snapshot?.Ships
-            ?? MonoBehaviourSingleton<ShipManager>.Instance?.ListAllSpaceShip
-            ?? UnityEngine.Object.FindObjectsOfType<Spacecraft>().ToList();
-        var allShips = ships
+        var allShips = (MonoBehaviourSingleton<ShipManager>.Instance?.ListAllSpaceShip
+                ?? UnityEngine.Object.FindObjectsOfType<Spacecraft>().ToList())
             .Where(sc => sc != null && sc.spacecraftType != null
                 && sc.GetCompany() == player
                 && sc.CurrentlyOnThisObject == location
@@ -3053,7 +2940,6 @@ public static class LogisticsObserver
             return null;
         }
 
-        var committedIds = snapshot?.CommittedShipIds;
         var quotaExhausted = false;
         var matchingPresent = false;
         var idleMatchingPresent = false;
@@ -3067,8 +2953,9 @@ public static class LogisticsObserver
                 continue;
 
             matchingPresent = true;
+            var cycleManager = MonoBehaviourSingleton<CycleMissionManager>.Instance;
             var committedAtLocation = matchingShips.Count(sc =>
-                IsSpacecraftAlreadyCommitted(sc, player, out _, committedShipIds: committedIds));
+                IsSpacecraftAlreadyCommitted(sc, player, out _));
             var canUse = quota.count - committedAtLocation;
             if (canUse <= 0)
             {
@@ -3077,7 +2964,7 @@ public static class LogisticsObserver
             }
 
             var idleShips = matchingShips
-                .Where(sc => IsSpacecraftAvailableForLogistics(sc, player, committedIds))
+                .Where(sc => IsSpacecraftAvailableForLogistics(sc, player))
                 .OrderByDescending(sc => sc.spacecraftType.GetCargoCapacity(player))
                 .ToList();
             if (idleShips.Count == 0)
@@ -3103,7 +2990,7 @@ public static class LogisticsObserver
     private static bool TryFindSurfaceLaunch(ObjectInfo providerOI, ObjectInfo targetOI, Company player,
         Dictionary<string, int> scActive, Dictionary<string, int> lvActive, bool requireContainerOnly, bool requireRegularSC,
         out LaunchVehicleType lvType, out Spacecraft carrier, out string reason, out string supportDetail,
-        out int supportTierAdjustment, PlannerSnapshot snapshot = null)
+        out int supportTierAdjustment)
     {
         lvType = null;
         carrier = null;
@@ -3126,11 +3013,11 @@ public static class LogisticsObserver
         var lvQuotas = provData.launchVehicleQuota.Where(q => q.count > 0).ToList();
         if (lvQuotas.Count == 0)
         {
-            reason = LogisticsStrings.NoLvQuotaAt(providerOI, DescribeAvailableLaunchSupport(providerOI, player, snapshot));
+            reason = LogisticsStrings.NoLvQuotaAt(providerOI, DescribeAvailableLaunchSupport(providerOI, player));
             return false;
         }
 
-        var allReadyLV = GetAvailableLaunchSupport(providerOI, player, snapshot)
+        var allReadyLV = GetAvailableLaunchSupport(providerOI, player)
             .Where(option => option?.Vehicle != null
                 && option.Type != null
                 && option.Vehicle.GetCompany() == player
@@ -3139,7 +3026,7 @@ public static class LogisticsObserver
             .ToList();
         if (allReadyLV.Count == 0)
         {
-            reason = LogisticsStrings.NoReadyLvAt(providerOI, DescribeAvailableLaunchSupport(providerOI, player, snapshot));
+            reason = LogisticsStrings.NoReadyLvAt(providerOI, DescribeAvailableLaunchSupport(providerOI, player));
             return false;
         }
 
@@ -3148,7 +3035,7 @@ public static class LogisticsObserver
             .ToList();
         if (matchingReadyLV.Count == 0)
         {
-            reason = LogisticsStrings.NoMatchingLvQuotaAt(providerOI, DescribeAvailableLaunchSupport(providerOI, player, snapshot));
+            reason = LogisticsStrings.NoMatchingLvQuotaAt(providerOI, DescribeAvailableLaunchSupport(providerOI, player));
             return false;
         }
 
@@ -3194,26 +3081,11 @@ public static class LogisticsObserver
         return carrier != null;
     }
 
-    private static List<LaunchSupportOption> GetAvailableLaunchSupport(ObjectInfo providerOI, Company player, PlannerSnapshot snapshot = null)
+    private static List<LaunchSupportOption> GetAvailableLaunchSupport(ObjectInfo providerOI, Company player)
     {
         if (providerOI == null || player == null)
             return new List<LaunchSupportOption>();
 
-        if (snapshot != null && providerOI.id > 0)
-        {
-            if (snapshot.LaunchSupportByObjectId.TryGetValue(providerOI.id, out var cached))
-                return cached;
-
-            var computed = BuildAvailableLaunchSupport(providerOI, player);
-            snapshot.LaunchSupportByObjectId[providerOI.id] = computed;
-            return computed;
-        }
-
-        return BuildAvailableLaunchSupport(providerOI, player);
-    }
-
-    private static List<LaunchSupportOption> BuildAvailableLaunchSupport(ObjectInfo providerOI, Company player)
-    {
         var objectData = providerOI.GetObjectInfoData(player);
         var seen = new HashSet<int>();
         var result = new List<LaunchSupportOption>();
@@ -3272,9 +3144,9 @@ public static class LogisticsObserver
         return result;
     }
 
-    private static string DescribeAvailableLaunchSupport(ObjectInfo providerOI, Company player, PlannerSnapshot snapshot = null)
+    private static string DescribeAvailableLaunchSupport(ObjectInfo providerOI, Company player)
     {
-        var support = GetAvailableLaunchSupport(providerOI, player, snapshot);
+        var support = GetAvailableLaunchSupport(providerOI, player);
         if (support.Count == 0)
         {
             if (providerOI?.IsUseInSpaceElevator == true && providerOI.parentObjectInfo?.LowOrbitCustom != null)
@@ -3754,11 +3626,8 @@ public static class LogisticsObserver
         var label = lvTypeA != null
             ? $"LV+Container: A={realProvider.ObjectName} B={requesterOI.ObjectName} lv={lvTypeA.Name}"
             : $"SC: A={realProvider.ObjectName} B={requesterOI.ObjectName} ship=1";
-        if (VerboseLoggingEnabled)
-        {
-            Log($"LOGI-MANIFEST direct: route={realProvider.ObjectName}->{requesterOI.ObjectName} rd={rd.ID} ship={sc.GetSpacecraftName()} scType={sc.spacecraftType?.NameRocketType} capacity={capacity:0.#} targetCargo={amount:0.#} reserveFuel={reserveFuelCargo:0.#} totalPayload={cargoToB.CargoCurrent:0.#} transfer={transferType} manifest={FormatCargo(cargoToB)}");
-            Log($"Cycle: {label} rd={rd.ID} transfer={transferType} targetAmount={amount} reserveFuel={reserveFuelCargo:0.#} manifest={FormatCargo(cargoToB)}");
-        }
+        Log($"LOGI-MANIFEST direct: route={realProvider.ObjectName}->{requesterOI.ObjectName} rd={rd.ID} ship={sc.GetSpacecraftName()} scType={sc.spacecraftType?.NameRocketType} capacity={capacity:0.#} targetCargo={amount:0.#} reserveFuel={reserveFuelCargo:0.#} totalPayload={cargoToB.CargoCurrent:0.#} transfer={transferType} manifest={FormatCargo(cargoToB)}");
+        Log($"Cycle: {label} rd={rd.ID} transfer={transferType} targetAmount={amount} reserveFuel={reserveFuelCargo:0.#} manifest={FormatCargo(cargoToB)}");
 
         req.status = Data.LogisticsRequestStatus.InProgress;
 
@@ -3843,11 +3712,8 @@ public static class LogisticsObserver
         CommitStock(realProvider, rd, amount);
 
         var label = $"LV+{(isLOC?"Container":"SC")} Cycle: A={realProvider.ObjectName} B={requesterOI.ObjectName} lv={lvTypeA.Name} transfer={transferType}";
-        if (VerboseLoggingEnabled)
-        {
-            Log($"LOGI-MANIFEST lv: route={realProvider.ObjectName}->{requesterOI.ObjectName} rd={rd.ID} carrier={container.GetSpacecraftName()} scType={container.spacecraftType?.NameRocketType} capacity={scCapacity:0.#} targetCargo={amount:0.#} reserveFuel={reserveFuelCargo:0.#} totalPayload={cargoToB.CargoCurrent:0.#} lv={lvTypeA?.Name ?? "none"} transfer={transferType} manifest={FormatCargo(cargoToB)}");
-            Log($"Cycle: {label} rd={rd.ID} targetAmount={amount} reserveFuel={reserveFuelCargo:0.#} manifest={FormatCargo(cargoToB)}");
-        }
+        Log($"LOGI-MANIFEST lv: route={realProvider.ObjectName}->{requesterOI.ObjectName} rd={rd.ID} carrier={container.GetSpacecraftName()} scType={container.spacecraftType?.NameRocketType} capacity={scCapacity:0.#} targetCargo={amount:0.#} reserveFuel={reserveFuelCargo:0.#} totalPayload={cargoToB.CargoCurrent:0.#} lv={lvTypeA?.Name ?? "none"} transfer={transferType} manifest={FormatCargo(cargoToB)}");
+        Log($"Cycle: {label} rd={rd.ID} targetAmount={amount} reserveFuel={reserveFuelCargo:0.#} manifest={FormatCargo(cargoToB)}");
 
         req.status = Data.LogisticsRequestStatus.InProgress;
 

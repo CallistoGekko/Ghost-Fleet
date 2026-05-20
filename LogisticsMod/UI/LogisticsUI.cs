@@ -250,7 +250,8 @@ public class LogisticsUI : MonoBehaviour
         }
         catch (System.Exception ex)
         {
-            LogisticsObserver.LogWarning($"UISTYLE capture failed for {sectionName}: {ex.Message}");
+            if (LogisticsObserver.VerboseLoggingEnabled)
+                LogisticsObserver.LogWarning($"UISTYLE capture failed for {sectionName}: {ex.Message}");
         }
     }
 
@@ -280,7 +281,7 @@ public class LogisticsUI : MonoBehaviour
         var prevId = _currentObjectInfo?.id ?? -1;
         LogisticsObserver.LogVerbose($"RefreshData: \"{newName}\" (id={newId}), _built={_built}, prev=\"{prevName}\" (id={prevId})");
 
-        if (newOi != null && _currentObjectInfo != null && newId == prevId && newName != prevName)
+        if (LogisticsObserver.VerboseLoggingEnabled && newOi != null && _currentObjectInfo != null && newId == prevId && newName != prevName)
             LogisticsObserver.LogWarning($"DIAG RefreshData: SAME id ({newId}) but DIFFERENT name! prev=\"{prevName}\" new=\"{newName}\"");
 
         if (newOi != null)
@@ -288,10 +289,13 @@ public class LogisticsUI : MonoBehaviour
             var dictData = Data.LogisticsNetwork.Get(newOi);
             if (dictData != null)
             {
+                if (LogisticsObserver.VerboseLoggingEnabled)
+                {
                 var storedOiName = (dictData.ObjectInfo as ObjectInfo)?.ObjectName ?? "NULL";
                 if (storedOiName != newName)
                     LogisticsObserver.LogWarning($"DIAG RefreshData: dict entry id={newId} has storedOI=\"{storedOiName}\" but incoming OI name=\"{newName}\" — MISMATCH!");
                 LogisticsObserver.LogVerbose($"DIAG RefreshData: dict data for id={newId}: {dictData.requests.Count}req {dictData.providers.Count}prov");
+                }
             }
             else
             {
@@ -383,7 +387,8 @@ public class LogisticsUI : MonoBehaviour
                 MakeXButton(row.transform, () =>
                 {
                     var capturedOi = _currentObjectInfo;
-                    LogisticsObserver.Log($"X clicked on GET req idx={idx} capturedOi=\"{capturedOi?.ObjectName}\"(id={capturedOi?.id})");
+                    if (LogisticsObserver.VerboseLoggingEnabled)
+                        LogisticsObserver.Log($"X clicked on GET req idx={idx} capturedOi=\"{capturedOi?.ObjectName}\"(id={capturedOi?.id})");
                     Data.LogisticsNetwork.RemoveRequest(capturedOi, idx);
                     BuildGetSection();
                     RebuildSectionLayout(_getSection);
@@ -525,7 +530,8 @@ public class LogisticsUI : MonoBehaviour
                 MakeXButton(row.transform, () =>
                 {
                     var capturedOi = _currentObjectInfo;
-                    LogisticsObserver.Log($"X clicked on SEND prov idx={idx} capturedOi=\"{capturedOi?.ObjectName}\"(id={capturedOi?.id})");
+                    if (LogisticsObserver.VerboseLoggingEnabled)
+                        LogisticsObserver.Log($"X clicked on SEND prov idx={idx} capturedOi=\"{capturedOi?.ObjectName}\"(id={capturedOi?.id})");
                     Data.LogisticsNetwork.RemoveProvider(capturedOi, idx);
                     BuildSendSection();
                     RebuildSectionLayout(_sendSection);
@@ -819,7 +825,8 @@ public class LogisticsUI : MonoBehaviour
     private void ShowAmountInput(LogisticsSection section, ResourceDefinition rd, bool isGet, bool isAvailable = true)
     {
         var capturedOi = _currentObjectInfo;
-        LogisticsObserver.Log($"ShowAmountInput: rd={rd.ID} isGet={isGet} capturedOi=\"{capturedOi?.ObjectName}\"(id={capturedOi?.id})");
+        if (LogisticsObserver.VerboseLoggingEnabled)
+            LogisticsObserver.Log($"ShowAmountInput: rd={rd.ID} isGet={isGet} capturedOi=\"{capturedOi?.ObjectName}\"(id={capturedOi?.id})");
         _inputConfirmed = false;
         double currentAmount = 0;
         double targetAmount = 0;

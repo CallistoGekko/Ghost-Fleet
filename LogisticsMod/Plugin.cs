@@ -6,7 +6,7 @@ using System.IO;
 
 namespace LogisticsMod;
 
-[BepInPlugin("com.logisticsmod", "Logistics Tab", "0.2.0")]
+[BepInPlugin("com.logisticsmod", "Logistics Tab", "0.3.0")]
 public class Plugin : BaseUnityPlugin
 {
     public static Plugin Instance { get; private set; }

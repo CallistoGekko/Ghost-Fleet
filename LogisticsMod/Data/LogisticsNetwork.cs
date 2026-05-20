@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using CustomUpdate;
@@ -212,7 +213,7 @@ public static class LogisticsNetwork
         if (isSpacecraft)
         {
             var cm = MonoBehaviourSingleton<CycleMissionManager>.Instance;
-            foreach (var sc in Object.FindObjectsOfType<Spacecraft>())
+            foreach (var sc in UnityEngine.Object.FindObjectsOfType<Spacecraft>())
             {
                 if (sc == null || sc.spacecraftType == null) continue;
                 if (sc.GetCompany() != player) continue;
@@ -225,8 +226,12 @@ public static class LogisticsNetwork
         }
         else
         {
-            foreach (var lv in Object.FindObjectsOfType<LaunchVehicle>())
+            var rows = oi.GetListLaunchVehicle(player);
+            if (rows == null) return result;
+
+            foreach (var row in rows)
             {
+                var lv = row?.launchVehicle;
                 if (lv == null || lv.launchVehicleType == null) continue;
                 if (lv.GetCompany() != player) continue;
                 if (lv.objectInfo != oi) continue;
@@ -247,7 +252,7 @@ public static class LogisticsNetwork
         var cm = MonoBehaviourSingleton<CycleMissionManager>.Instance;
         var count = 0;
 
-        foreach (var sc in Object.FindObjectsOfType<Spacecraft>())
+        foreach (var sc in UnityEngine.Object.FindObjectsOfType<Spacecraft>())
         {
             if (sc == null || sc.spacecraftType == null) continue;
             if (sc.GetCompany() != player) continue;
@@ -306,7 +311,7 @@ public static class LogisticsNetwork
     {
         if (quota == null) return false;
         var key = TypeKey(id, fallbackName);
-        return quota.typeName == key || quota.typeName == fallbackName;
+        return SameQuotaKey(quota.typeName, key) || SameQuotaKey(quota.typeName, fallbackName);
     }
 
     public static int ActiveCountFor(Dictionary<string, int> active, string id, string fallbackName)
@@ -317,6 +322,12 @@ public static class LogisticsNetwork
         if (!string.IsNullOrEmpty(fallbackName) && active.TryGetValue(fallbackName, out var legacy))
             result += legacy;
         return result;
+    }
+
+    private static bool SameQuotaKey(string a, string b)
+    {
+        if (string.IsNullOrWhiteSpace(a) || string.IsNullOrWhiteSpace(b)) return false;
+        return string.Equals(a.Trim(), b.Trim(), StringComparison.OrdinalIgnoreCase);
     }
 
     public static HashSet<ResourceDefinition> GetNetworkResourcesSet(Company player)

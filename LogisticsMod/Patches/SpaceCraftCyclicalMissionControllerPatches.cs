@@ -5,6 +5,7 @@ using Game.Info;
 using Game.ObjectInfoDataScripts;
 using Game.UI.Windows.Elements.MissionsElements;
 using Game.UI.Windows.Elements.PlanMissionElements;
+using Game.UI.Windows.Elements.PlanMissionElements.PMScheduleElements;
 using Game.UI.Windows.Windows;
 using Game.VisualizationScripts;
 using LogisticsMod.Logic;
@@ -22,66 +23,55 @@ internal static class SpaceCraftCyclicalMissionControllerPatches
     [HarmonyPrefix]
     private static void SetPMParameterForCodeJobSystemPrefix(PMMissionParameter _pmMissionParameter, ref Action result)
     {
-        var isLogi = LogisticsObserver.IsLogisticsPlan(_pmMissionParameter);
         var cmdFromShip = (_pmMissionParameter?.SC as Spacecraft) == null
             ? null
             : MonoBehaviourSingleton<CycleMissionManager>.Instance?.GetCycleMission((Spacecraft)_pmMissionParameter.SC);
+        var isLogi = cmdFromShip?.customNameFromPlanMission != null
+            && cmdFromShip.customNameFromPlanMission.StartsWith("[LOGI", StringComparison.Ordinal);
+        if (!isLogi)
+            isLogi = LogisticsObserver.IsLogisticsPlan(_pmMissionParameter);
         if (!isLogi
             && cmdFromShip?.customNameFromPlanMission != null
             && cmdFromShip.customNameFromPlanMission.StartsWith("[LOGI", StringComparison.Ordinal))
         {
             isLogi = true;
-            LogisticsObserver.LogWarning(
-                $"LOGI-CODEJOB recovered-cycle-map: pmpName=\"{_pmMissionParameter?.MissionName ?? "null"}\" " +
-                $"cmdName=\"{cmdFromShip.customNameFromPlanMission}\" sc={DescribeSpacecraft(_pmMissionParameter?.SC)} " +
-                $"route={_pmMissionParameter?.Start?.ObjectName ?? "null"}->{_pmMissionParameter?.Target?.ObjectName ?? "null"}");
+            if (LogisticsObserver.VerboseLoggingEnabled)
+                LogisticsObserver.LogWarning(
+                    $"LOGI-CODEJOB recovered-cycle-map: pmpName=\"{_pmMissionParameter?.MissionName ?? "null"}\" " +
+                    $"cmdName=\"{cmdFromShip.customNameFromPlanMission}\" sc={DescribeSpacecraft(_pmMissionParameter?.SC)} " +
+                    $"route={_pmMissionParameter?.Start?.ObjectName ?? "null"}->{_pmMissionParameter?.Target?.ObjectName ?? "null"}");
         }
         if (!isLogi) return;
 
         _pmMissionParameter.TryFixWrongThrust = true;
         if (cmdFromShip != null)
+        {
             cmdFromShip.wasSetPMParameterForCodeJobSystem = true;
-        LogisticsObserver.LogWarning(
-            $"LOGI-CODEJOB prefix: pmpName=\"{_pmMissionParameter.MissionName}\" " +
-            $"cmdName=\"{cmdFromShip?.customNameFromPlanMission ?? "null"}\" " +
-            $"wasSet={cmdFromShip?.wasSetPMParameterForCodeJobSystem.ToString() ?? "null"} " +
-            $"sc={DescribeSpacecraft(_pmMissionParameter.SC)} " +
-            $"route={_pmMissionParameter.Start?.ObjectName ?? "null"}->{_pmMissionParameter.Target?.ObjectName ?? "null"} " +
-            $"{DescribePayload(_pmMissionParameter)}");
-        LogisticsObserver.Log(
-            $"NAMING TRACE codejob-prefix: pmpName=\"{_pmMissionParameter.MissionName}\" " +
-            $"sc={DescribeSpacecraft(_pmMissionParameter.SC)} " +
-            $"route={_pmMissionParameter.Start?.ObjectName ?? "null"}->{_pmMissionParameter.Target?.ObjectName ?? "null"} " +
-            $"creator={_pmMissionParameter.MissionCreator}");
+
+            // Stock bug: for MoonCase routes, TryPlanCycleMission hardcodes
+            // TransferTypeMoonCase = Optimal and only sets ClickFastestButton
+            // in the !MoonCase branch. Override all three flags here
+            // unconditionally — MoonCase may not be set yet at prefix time
+            // (it's computed later inside GravityEngineCalculate), but
+            // TransferTypeMoonCase is read during trajectory selection.
+            if (cmdFromShip.TransferType == ETransferType.Fastest)
+            {
+                _pmMissionParameter.ClickFastestButton = true;
+                _pmMissionParameter.TryFastAsPossible = true;
+                _pmMissionParameter.TransferTypeMoonCase = ETransferType.Fastest;
+            }
+        }
+        if (LogisticsObserver.VerboseLoggingEnabled)
+            LogisticsObserver.LogVerbose(
+                $"LOGI-CODEJOB prefix: sc={DescribeSpacecraft(_pmMissionParameter.SC)} " +
+                $"route={_pmMissionParameter.Start?.ObjectName ?? "null"}->{_pmMissionParameter.Target?.ObjectName ?? "null"}");
 
         var original = result;
         result = () =>
         {
-            LogisticsObserver.LogWarning(
-                $"LOGI-CODEJOB callback-before: pmpName=\"{_pmMissionParameter.MissionName}\" " +
-                $"found=\"{LogisticsObserver.FindLogisticsCycleName(_pmMissionParameter) ?? "null"}\" " +
-                $"cmdName=\"{cmdFromShip?.customNameFromPlanMission ?? "null"}\" " +
-                $"result={_pmMissionParameter.CheckCanPlanMission().planMissionResult} " +
-                $"{DescribePayload(_pmMissionParameter)}");
-            LogisticsObserver.Log(
-                $"NAMING TRACE codejob-callback-before: pmpName=\"{_pmMissionParameter.MissionName}\" " +
-                $"found=\"{LogisticsObserver.FindLogisticsCycleName(_pmMissionParameter) ?? "null"}\" " +
-                $"sc={DescribeSpacecraft(_pmMissionParameter.SC)}");
             RestoreLogisticsMissionName(_pmMissionParameter, "codejob");
             LogisticsObserver.CapLogisticsCargoForPlannerLimits(_pmMissionParameter);
-            LogisticsObserver.Log($"LOGI-SCHEDULE selected-before-create: {_pmMissionParameter.Start?.ObjectName ?? "null"}->{_pmMissionParameter.Target?.ObjectName ?? "null"} depart={_pmMissionParameter.DepartureTimeDate:yyyy-MM-dd} arrive={_pmMissionParameter.Arrival:yyyy-MM-dd} result={_pmMissionParameter.CheckCanPlanMission().planMissionResult} {DescribePayload(_pmMissionParameter)} fastClick={_pmMissionParameter.ClickFastestButton} tryFast={_pmMissionParameter.TryFastAsPossible} tryFixWrongThrust={_pmMissionParameter.TryFixWrongThrust}");
             original?.Invoke();
-            LogisticsObserver.LogWarning(
-                $"LOGI-CODEJOB callback-after: pmpName=\"{_pmMissionParameter.MissionName}\" " +
-                $"found=\"{LogisticsObserver.FindLogisticsCycleName(_pmMissionParameter) ?? "null"}\" " +
-                $"cmdName=\"{cmdFromShip?.customNameFromPlanMission ?? "null"}\" " +
-                $"result={_pmMissionParameter.CheckCanPlanMission().planMissionResult} " +
-                $"{DescribePayload(_pmMissionParameter)}");
-            LogisticsObserver.Log(
-                $"NAMING TRACE codejob-callback-after: pmpName=\"{_pmMissionParameter.MissionName}\" " +
-                $"found=\"{LogisticsObserver.FindLogisticsCycleName(_pmMissionParameter) ?? "null"}\" " +
-                $"sc={DescribeSpacecraft(_pmMissionParameter.SC)}");
-            LogisticsObserver.Log($"LOGI-SCHEDULE after-create: {_pmMissionParameter.Start?.ObjectName ?? "null"}->{_pmMissionParameter.Target?.ObjectName ?? "null"} depart={_pmMissionParameter.DepartureTimeDate:yyyy-MM-dd} arrive={_pmMissionParameter.Arrival:yyyy-MM-dd} result={_pmMissionParameter.CheckCanPlanMission().planMissionResult} {DescribePayload(_pmMissionParameter)} fastClick={_pmMissionParameter.ClickFastestButton}");
         };
     }
 
@@ -92,26 +82,106 @@ internal static class SpaceCraftCyclicalMissionControllerPatches
         var cmd = __instance.CycleMissionsData;
         if (cmd == null) return true;
         if (cmd.customNameFromPlanMission != null
-            && cmd.customNameFromPlanMission.StartsWith("[LOGI", StringComparison.Ordinal))
-        {
-            var sc = Traverse.Create(__instance).Field("sc").GetValue<Spacecraft>();
-            LogisticsObserver.LogWarning(
-                $"LOGI-CYCLE tryplan-prefix: name=\"{cmd.customNameFromPlanMission}\" " +
-                $"planFlyWas={__instance.CycleMissionPlanFlyWas} wasSet={cmd.wasSetPMParameterForCodeJobSystem} pause={cmd.Pause} " +
-                $"route={cmd.A?.ObjectName ?? "null"}->{cmd.B?.ObjectName ?? "null"} " +
-                $"sc={DescribeSpacecraft(sc)} current={sc?.CurrentlyOnThisObject?.ObjectName ?? "null"} " +
-                $"phase={sc?.CurrentPhase.ToString() ?? "null"} countSC={cmd.CountSC} " +
-                $"cargoStart={cmd.CargoStart} cargoEnd={cmd.CargoEnd} transfer={cmd.TransferType} ends={cmd.Ends} " +
-                $"{DescribeCycleEnds(cmd)} {DescribeCycleCargoTabs(cmd)}");
-        }
-        if (cmd.customNameFromPlanMission != null
             && cmd.customNameFromPlanMission.StartsWith("[LOGI")
             && __instance.CycleMissionPlanFlyWas)
         {
-            LogisticsObserver.LogWarning($"SKIP LOGI replanning: {cmd.customNameFromPlanMission}");
+            LogisticsObserver.LogVerbose($"SKIP LOGI replanning: {cmd.customNameFromPlanMission}");
             return false;
         }
         return true;
+    }
+
+    /// <summary>
+    /// Stock bug fix: PlanMissionWindow.Update() never calls SetEffectiveDeltaV for
+    /// ForCode windows (guarded by <c>!forCode</c>), leaving EffectiveDeltaVOld at 0.
+    /// ButtonFastestClickButton uses EffectiveDeltaVOld as a delta-V filter —
+    /// with 0 every grid point is rejected and the fastest search silently fails,
+    /// falling back to the initial (near-optimal) trajectory.
+    ///
+    /// Fix: before the fastest search, compute the ship's actual max delta-V
+    /// (Tsiolkovsky equation with full fuel tank) and set it on the porkchop,
+    /// then push the fuel slider to max so CheckScheduleFly can validate
+    /// high-energy trajectories. ButtonFastestClickButton's own fuel-sweep loop
+    /// will optimise fuel down to the minimum needed for the chosen trajectory.
+    /// </summary>
+    [HarmonyPatch(typeof(PMTabSchedule), nameof(PMTabSchedule.ButtonFastestClickButton))]
+    [HarmonyPrefix]
+    private static void ButtonFastestClickButtonPrefix(PMTabSchedule __instance)
+    {
+        var pmw = __instance.PlanMissionWindow;
+        if (pmw == null || !pmw.ForCode)
+            return;
+
+        var pmp = pmw.PMMissionParameter;
+        if (pmp?.SC == null || pmp.CargoAll?.cargoFuel == null)
+            return;
+
+        var scType = pmp.SC.GetTypeSpaceCraft();
+        if (scType == null || scType.NotUsePorkchope || scType.SolarSC)
+            return;
+
+        // 1. Compute max effective delta-V from full fuel tank
+        float exhaustV = scType.GetExhaustV(pmp.FlyCompany);
+        double cargoMass = pmp.CargoAll.CargoCurrent;
+        double dryMass = (double)pmp.SC.GetMass() + cargoMass;
+        float maxFuelCapacity = scType.GetFuelCapacity(pmp.FlyCompany) * Math.Max(1, pmp.SCCount);
+        double wetMass = dryMass + (double)maxFuelCapacity;
+
+        if (wetMass <= dryMass || dryMass <= 0 || exhaustV <= 0)
+            return;
+
+        int effectiveDV = (int)((double)exhaustV * Math.Log(wetMass / dryMass, Math.E));
+        __instance.porkchop.SetEffectiveDeltaV(effectiveDV);
+
+        // 2. Push fuel slider to max so high-energy trajectories pass CheckScheduleFly.
+        //    ButtonFastestClickButton has its own fuel-sweep loop that will reduce
+        //    fuel to the minimum needed for the chosen trajectory.
+        var fuelUI = Traverse.Create(__instance).Field("fuelSpaceCraftUI")
+            .GetValue<FuelSpaceCraftUI>();
+        if (fuelUI != null)
+        {
+            pmp.CargoAll.cargoFuel.cargoMassPotencjal = (double)maxFuelCapacity;
+            fuelUI.SliderSetValue((float)fuelUI.MaxSlider);
+        }
+    }
+
+    [HarmonyPatch(typeof(Spacecraft), "ShowNotificationLand")]
+    [HarmonyPrefix]
+    private static bool ShowNotificationLandPrefix(Spacecraft __instance)
+    {
+        return !ShouldSuppressCyclicalArrivalNotification(__instance, "land");
+    }
+
+    [HarmonyPatch(typeof(Spacecraft), "ShowNotificationAsteroidImpact")]
+    [HarmonyPrefix]
+    private static bool ShowNotificationAsteroidImpactPrefix(Spacecraft __instance)
+    {
+        return !ShouldSuppressCyclicalArrivalNotification(__instance, "asteroid-impact");
+    }
+
+    [HarmonyPatch(typeof(Spacecraft), "ShowNotificationSolarSystem")]
+    [HarmonyPrefix]
+    private static bool ShowNotificationSolarSystemPrefix(Spacecraft __instance)
+    {
+        return !ShouldSuppressCyclicalArrivalNotification(__instance, "solar-system");
+    }
+
+    [HarmonyPatch(typeof(Spacecraft), "ShowNotificationAsteroidPull")]
+    [HarmonyPrefix]
+    private static bool ShowNotificationAsteroidPullPrefix(Spacecraft __instance)
+    {
+        return !ShouldSuppressCyclicalArrivalNotification(__instance, "asteroid-pull");
+    }
+
+    [HarmonyPatch(typeof(PMMissionParameter), nameof(PMMissionParameter.CheckLVFullListOrNone))]
+    [HarmonyPrefix]
+    private static bool CheckLVFullListOrNonePrefix(PMMissionParameter __instance, ref bool __result)
+    {
+        if (!LogisticsObserver.TryOverrideLogisticsSelfLaunchCheck(__instance, out var requiresFullLaunchVehicleList))
+            return true;
+
+        __result = requiresFullLaunchVehicleList;
+        return false;
     }
 
     [HarmonyPatch(typeof(ObjectInfoData), nameof(ObjectInfoData.CreatedCargoToTakeNormal))]
@@ -120,25 +190,19 @@ internal static class SpaceCraftCyclicalMissionControllerPatches
         CycleMissionsData cycleMissionsData, ObjectInfo startObject, Spacecraft sc, LaunchVehicle lv,
         bool allResourceOnPlanet, double? loadLimit2, int countSC, bool addSupply, TimeSpan? missionLenght)
     {
-        if (cycleMissionsData?.customNameFromPlanMission == null
+        if (!LogisticsObserver.VerboseLoggingEnabled
+            || cycleMissionsData?.customNameFromPlanMission == null
             || !cycleMissionsData.customNameFromPlanMission.StartsWith("[LOGI", StringComparison.Ordinal))
         {
             return;
         }
 
         var company = sc?.GetCompany() ?? cycleMissionsData.Company;
-        LogisticsObserver.LogWarning(
+        LogisticsObserver.LogVerbose(
             $"LOGI-CARGO created: name=\"{cycleMissionsData.customNameFromPlanMission}\" " +
-            $"cargoStart={cargoStart} start={startObject?.ObjectName ?? "null"} " +
-            $"route={cycleMissionsData.A?.ObjectName ?? "null"}->{cycleMissionsData.B?.ObjectName ?? "null"} " +
-            $"sc={DescribeSpacecraft(sc)} scCurrent={sc?.CurrentlyOnThisObject?.ObjectName ?? "null"} " +
-            $"lv={lv?.GetLaunchVehicleType()?.Name ?? "null"} countSC={countSC} " +
-            $"loadLimit={(loadLimit2.HasValue ? loadLimit2.Value.ToString("0.#") : "null")} " +
-            $"addSupply={addSupply} missionDays={(missionLenght.HasValue ? missionLenght.Value.TotalDays.ToString("0.#") : "null")} " +
-            $"allResourceOnPlanet={allResourceOnPlanet} cargo={DescribeCargo(__result)} " +
-            $"cargoCurrent={__result?.CargoCurrent.ToString("0.#") ?? "null"} " +
-            $"{DescribeCycleEnds(cycleMissionsData)} " +
-            $"stockStart={DescribeStock(startObject, company, cycleMissionsData, startObject == cycleMissionsData.A)}");
+            $"start={startObject?.ObjectName ?? "null"} " +
+            $"sc={DescribeSpacecraft(sc)} allOnPlanet={allResourceOnPlanet} " +
+            $"cargo={DescribeCargo(__result)}");
     }
 
     [HarmonyPatch(typeof(PMTabSchedule), nameof(PMTabSchedule.OnClickScheduleButtonForCode))]
@@ -146,23 +210,11 @@ internal static class SpaceCraftCyclicalMissionControllerPatches
     private static void OnClickScheduleButtonForCodePostfix(ref MissionInfo __result)
     {
         if (__result == null)
-        {
-            LogisticsObserver.Log("NAMING TRACE schedule-postfix: result=null");
             return;
-        }
         if (__result.spacecraftInfo2 is not Spacecraft sc)
-        {
-            LogisticsObserver.Log(
-                $"NAMING TRACE schedule-postfix: id={__result.id} name=\"{__result.missionName}\" " +
-                $"creator={__result.missionCreator} sc={DescribeSpacecraft(__result.spacecraftInfo2)} no-spacecraft");
             return;
-        }
 
         var cmd = MonoBehaviourSingleton<CycleMissionManager>.Instance?.GetCycleMission(sc);
-        LogisticsObserver.Log(
-            $"NAMING TRACE schedule-postfix: id={__result.id} name=\"{__result.missionName}\" " +
-            $"creator={__result.missionCreator} sc={DescribeSpacecraft(sc)} " +
-            $"cmd={cmd != null} cmdName=\"{cmd?.customNameFromPlanMission ?? "null"}\"");
         if (cmd?.customNameFromPlanMission == null
             || !cmd.customNameFromPlanMission.StartsWith("[LOGI", StringComparison.Ordinal))
         {
@@ -192,16 +244,9 @@ internal static class SpaceCraftCyclicalMissionControllerPatches
                 company,
                 listSC,
                 cargoAll);
-        LogisticsObserver.Log(
-            $"NAMING TRACE createinfo-prefix: incoming=\"{missionName}\" found=\"{name ?? "null"}\" " +
-            $"sc={DescribeSpacecraft(spacecraftInfo)} listSC={listSC?.Count ?? 0} " +
-            $"route={trajectoryObject?.StartObjectInfo?.ObjectName ?? "null"}->{trajectoryObject?.EndObjectInfo?.ObjectName ?? "null"} " +
-            $"company={company?.name ?? "null"} cargo={DescribeCargo(cargoAll)}");
         if (string.IsNullOrEmpty(name))
             return;
 
-        if (missionName != name)
-            LogisticsObserver.Log($"PLAN mission-name-createinfo: \"{missionName}\" -> \"{name}\"");
         missionName = name;
         __state = name;
     }
@@ -214,6 +259,13 @@ internal static class SpaceCraftCyclicalMissionControllerPatches
             return;
 
         var name = __state;
+        if (string.IsNullOrEmpty(name)
+            && __result.missionCreator != MissionInfo.EMissionCreator.Cyclical
+            && (__result.missionName == null || !__result.missionName.StartsWith("[LOGI", StringComparison.Ordinal)))
+        {
+            return;
+        }
+
         if (string.IsNullOrEmpty(name))
             name = LogisticsObserver.FindLogisticsCycleName(
                 __result.start,
@@ -221,12 +273,6 @@ internal static class SpaceCraftCyclicalMissionControllerPatches
                 __result.company,
                 __result.ListSpacecraftInfo2,
                 __result.cargoAll);
-        LogisticsObserver.Log(
-            $"NAMING TRACE createinfo-postfix: id={__result.id} current=\"{__result.missionName}\" found=\"{name ?? "null"}\" " +
-            $"fromCycle={__result.fromCyclicalMission} creator={__result.missionCreator} " +
-            $"sc={DescribeSpacecraft(__result.spacecraftInfo2)} listSC={__result.ListSpacecraftInfo2?.Count ?? 0} " +
-            $"route={__result.start?.ObjectName ?? "null"}->{__result.target?.ObjectName ?? "null"} cargo={DescribeCargo(__result.cargoAll)}");
-
         if (string.IsNullOrEmpty(name))
         {
             if (__result.missionName != null && __result.missionName.StartsWith("[LOGI", StringComparison.Ordinal))
@@ -234,8 +280,6 @@ internal static class SpaceCraftCyclicalMissionControllerPatches
             return;
         }
 
-        if (__result.missionName != name)
-            LogisticsObserver.Log($"PLAN mission-name-postcreate: \"{__result.missionName}\" -> \"{name}\"");
         __result.missionName = name;
         __result.fromCyclicalMission = true;
     }
@@ -252,6 +296,9 @@ internal static class SpaceCraftCyclicalMissionControllerPatches
     private static bool ChangeMissionNamePrefix(PMTabDestination __instance)
     {
         var pmw = Traverse.Create(__instance).Field("planMissionWindow").GetValue<PlanMissionWindow>();
+        if (!MightBeLogisticsPlan(pmw?.PMMissionParameter))
+            return true;
+
         return pmw?.PMMissionParameter == null
             || string.IsNullOrEmpty(LogisticsObserver.FindLogisticsCycleName(pmw.PMMissionParameter));
     }
@@ -264,15 +311,9 @@ internal static class SpaceCraftCyclicalMissionControllerPatches
             return;
 
         var name = LogisticsObserver.FindLogisticsCycleName(__instance);
-        LogisticsObserver.Log(
-            $"NAMING TRACE pmp-change-name: incoming=\"{_missionName}\" found=\"{name ?? "null"}\" " +
-            $"current=\"{__instance.MissionName}\" sc={DescribeSpacecraft(__instance.SC)} " +
-            $"route={__instance.Start?.ObjectName ?? "null"}->{__instance.Target?.ObjectName ?? "null"}");
         if (string.IsNullOrEmpty(name))
             return;
 
-        if (_missionName != name)
-            LogisticsObserver.Log($"PLAN mission-name-param: \"{_missionName}\" -> \"{name}\"");
         _missionName = name;
     }
 
@@ -282,6 +323,9 @@ internal static class SpaceCraftCyclicalMissionControllerPatches
     {
         var pmw = Traverse.Create(__instance).Field("planMissionWindow").GetValue<PlanMissionWindow>();
         var pmp = pmw?.PMMissionParameter;
+        if (!MightBeLogisticsPlan(pmp))
+            return true;
+
         var found = LogisticsObserver.FindLogisticsCycleName(pmp);
         var missionName = found ?? pmp?.MissionName;
         if (pmp != null
@@ -296,16 +340,16 @@ internal static class SpaceCraftCyclicalMissionControllerPatches
                 $"route={pmp.Start?.ObjectName ?? "null"}->{pmp.Target?.ObjectName ?? "null"} " +
                 $"sc={DescribeSpacecraft(pmp.SC)} cmd={cmd != null} cargo={DescribeCargo(pmp.CargoAll)}");
             if (cmd != null)
-                MonoBehaviourSingleton<CycleMissionManager>.Instance?.RemoveCycleMission(cmd);
+                LogisticsObserver.RemoveLogisticsCycle(MonoBehaviourSingleton<CycleMissionManager>.Instance, cmd);
             return false;
         }
-        if (pmp != null && !string.IsNullOrEmpty(LogisticsObserver.FindLogisticsCycleName(pmp)))
+        if (LogisticsObserver.VerboseLoggingEnabled && pmp != null && !string.IsNullOrEmpty(found))
         {
             LogisticsObserver.Log(
-                $"NAMING TRACE createfly-prefix: pmpName=\"{pmp.MissionName}\" found=\"{LogisticsObserver.FindLogisticsCycleName(pmp) ?? "null"}\" " +
+                $"NAMING TRACE createfly-prefix: pmpName=\"{pmp.MissionName}\" found=\"{found ?? "null"}\" " +
                 $"sc={DescribeSpacecraft(pmp.SC)} route={pmp.Start?.ObjectName ?? "null"}->{pmp.Target?.ObjectName ?? "null"}");
         }
-        if (pmp != null && !string.IsNullOrEmpty(missionName) && missionName.StartsWith("[LOGI", StringComparison.Ordinal))
+        if (LogisticsObserver.VerboseLoggingEnabled && pmp != null && !string.IsNullOrEmpty(missionName) && missionName.StartsWith("[LOGI", StringComparison.Ordinal))
         {
             LogisticsObserver.Log($"LOGI-LAUNCH createfly-prefix: name=\"{missionName}\" route={pmp.Start?.ObjectName ?? "null"}->{pmp.Target?.ObjectName ?? "null"} result={pmp.CheckCanPlanMission().planMissionResult} {DescribePayload(pmp)} sc={DescribeSpacecraft(pmp.SC)}");
         }
@@ -320,13 +364,23 @@ internal static class SpaceCraftCyclicalMissionControllerPatches
         var pmw = Traverse.Create(__instance).Field("planMissionWindow").GetValue<PlanMissionWindow>();
         var pmp = pmw?.PMMissionParameter;
         if (pmp == null) return;
+        if (!MightBeLogisticsPlan(pmp)
+            && (pmp.MissionName == null || !pmp.MissionName.StartsWith("[LOGI", StringComparison.Ordinal)))
+        {
+            return;
+        }
+
         var found = LogisticsObserver.FindLogisticsCycleName(pmp);
         if (string.IsNullOrEmpty(found) && (pmp.MissionName == null || !pmp.MissionName.StartsWith("[LOGI", StringComparison.Ordinal)))
             return;
-        LogisticsObserver.Log(
-            $"NAMING TRACE createfly-postfix: pmpName=\"{pmp.MissionName}\" found=\"{found ?? "null"}\" " +
-            $"sc={DescribeSpacecraft(pmp.SC)} route={pmp.Start?.ObjectName ?? "null"}->{pmp.Target?.ObjectName ?? "null"}");
-        LogisticsObserver.Log($"LOGI-LAUNCH createfly-postfix: pmpName=\"{pmp.MissionName}\" route={pmp.Start?.ObjectName ?? "null"}->{pmp.Target?.ObjectName ?? "null"} result={pmp.CheckCanPlanMission().planMissionResult} {DescribePayload(pmp)} sc={DescribeSpacecraft(pmp.SC)}");
+        if (LogisticsObserver.VerboseLoggingEnabled)
+        {
+            var result = pmp.CheckCanPlanMission().planMissionResult;
+            LogisticsObserver.Log(
+                $"NAMING TRACE createfly-postfix: pmpName=\"{pmp.MissionName}\" found=\"{found ?? "null"}\" " +
+                $"sc={DescribeSpacecraft(pmp.SC)} route={pmp.Start?.ObjectName ?? "null"}->{pmp.Target?.ObjectName ?? "null"}");
+            LogisticsObserver.Log($"LOGI-LAUNCH createfly-postfix: pmpName=\"{pmp.MissionName}\" route={pmp.Start?.ObjectName ?? "null"}->{pmp.Target?.ObjectName ?? "null"} result={result} {DescribePayload(pmp)} sc={DescribeSpacecraft(pmp.SC)}");
+        }
     }
 
     [HarmonyPatch(typeof(PMTabSchedule), "CreatedTrajectory")]
@@ -335,7 +389,7 @@ internal static class SpaceCraftCyclicalMissionControllerPatches
     {
         var pmw = Traverse.Create(__instance).Field("planMissionWindow").GetValue<PlanMissionWindow>();
         var pmp = pmw?.PMMissionParameter;
-        if (pmw?.ForCode == true && LogisticsObserver.IsLogisticsPlan(pmp))
+        if (pmw?.ForCode == true && MightBeLogisticsPlan(pmp) && LogisticsObserver.IsLogisticsPlan(pmp))
         {
             LogisticsObserver.LogVerbose($"PLAN suppress-preview-trajectory: {pmp.Start?.ObjectName ?? "null"}->{pmp.Target?.ObjectName ?? "null"}");
             return false;
@@ -346,6 +400,9 @@ internal static class SpaceCraftCyclicalMissionControllerPatches
 
     private static void RestoreLogisticsMissionName(PMMissionParameter pmp, string context)
     {
+        if (!MightBeLogisticsPlan(pmp))
+            return;
+
         var name = LogisticsObserver.FindLogisticsCycleName(pmp);
         if (string.IsNullOrEmpty(name))
             return;
@@ -364,7 +421,6 @@ internal static class SpaceCraftCyclicalMissionControllerPatches
         if (!isInteresting) return;
 
         var sc = mi.spacecraftInfo2 as Spacecraft;
-        var cmd = sc == null ? null : MonoBehaviourSingleton<CycleMissionManager>.Instance?.GetCycleMission(sc);
         if (!string.IsNullOrEmpty(mi.missionName) && mi.missionName.StartsWith("[LOGI", StringComparison.Ordinal))
         {
             var txtMissionName = Traverse.Create(__instance).Field("txtMissionName").GetValue<TextMeshProUGUI>();
@@ -373,17 +429,22 @@ internal static class SpaceCraftCyclicalMissionControllerPatches
             mi.fromCyclicalMission = true;
         }
 
-        LogisticsObserver.Log(
-            $"NAMING TRACE flight-label-setdata: id={mi.id} miName=\"{mi.missionName}\" " +
-            $"fromCycle={mi.fromCyclicalMission} sc={DescribeSpacecraft(sc)} " +
-            $"cmd={cmd != null} cmdName=\"{cmd?.customNameFromPlanMission ?? "null"}\" " +
-            $"route={mi.start?.ObjectName ?? "null"}->{mi.target?.ObjectName ?? "null"}");
+        if (LogisticsObserver.VerboseLoggingEnabled)
+        {
+            var cmd = sc == null ? null : MonoBehaviourSingleton<CycleMissionManager>.Instance?.GetCycleMission(sc);
+            LogisticsObserver.Log(
+                $"NAMING TRACE flight-label-setdata: id={mi.id} miName=\"{mi.missionName}\" " +
+                $"fromCycle={mi.fromCyclicalMission} sc={DescribeSpacecraft(sc)} " +
+                $"cmd={cmd != null} cmdName=\"{cmd?.customNameFromPlanMission ?? "null"}\" " +
+                $"route={mi.start?.ObjectName ?? "null"}->{mi.target?.ObjectName ?? "null"}");
+        }
     }
 
     [HarmonyPatch(typeof(MissionRow), "SetMissionInfo")]
     [HarmonyPostfix]
     private static void MissionRowSetMissionInfoPostfix(MissionInfo _missionInfo)
     {
+        if (!LogisticsObserver.VerboseLoggingEnabled) return;
         if (_missionInfo == null) return;
         if (_missionInfo.missionCreator != MissionInfo.EMissionCreator.Cyclical
             && (_missionInfo.missionName == null || _missionInfo.missionName.IndexOf("LOGI", StringComparison.Ordinal) < 0))
@@ -399,6 +460,7 @@ internal static class SpaceCraftCyclicalMissionControllerPatches
     [HarmonyPostfix]
     private static void MissionRowNewSetMissionInfoPostfix(MissionInfo _missionInfo, string stringActionText, MissionListByType.EMissionType _missionType)
     {
+        if (!LogisticsObserver.VerboseLoggingEnabled) return;
         if (_missionInfo == null) return;
         if (_missionInfo.missionCreator != MissionInfo.EMissionCreator.Cyclical
             && (_missionInfo.missionName == null || _missionInfo.missionName.IndexOf("LOGI", StringComparison.Ordinal) < 0))
@@ -434,6 +496,39 @@ internal static class SpaceCraftCyclicalMissionControllerPatches
         }
 
         return null;
+    }
+
+    private static bool MightBeLogisticsPlan(PMMissionParameter pmp)
+    {
+        if (pmp == null)
+            return false;
+        if (pmp.MissionName != null && pmp.MissionName.StartsWith("[LOGI", StringComparison.Ordinal))
+            return true;
+        if (pmp.SC is Spacecraft sc)
+        {
+            var cmd = MonoBehaviourSingleton<CycleMissionManager>.Instance?.GetCycleMission(sc);
+            if (cmd?.customNameFromPlanMission != null
+                && cmd.customNameFromPlanMission.StartsWith("[LOGI", StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+        return pmp.ForCyclicalMission || pmp.MissionCreator == MissionInfo.EMissionCreator.Cyclical;
+    }
+
+    private static bool ShouldSuppressCyclicalArrivalNotification(Spacecraft sc, string context)
+    {
+        var mi = sc?.GetMissionInfo();
+        if (mi == null)
+            return false;
+
+        var suppress = mi.fromCyclicalMission || LogisticsObserver.IsLogisticsMissionInfo(mi);
+        if (suppress)
+            LogisticsObserver.LogVerbose(
+                $"NOTIFY suppress-cyclical-arrival: context={context} mission={mi.id} name=\"{mi.missionName}\" " +
+                $"fromCycle={mi.fromCyclicalMission} sc={DescribeSpacecraft(sc)} route={mi.start?.ObjectName ?? "null"}->{mi.target?.ObjectName ?? "null"}");
+
+        return suppress;
     }
 
     private static string DescribeSpacecraft(ISpacecraftInfo spacecraftInfo)
