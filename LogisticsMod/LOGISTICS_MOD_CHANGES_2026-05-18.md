@@ -46,12 +46,12 @@ This note summarizes the recent source-code changes made during the logistics ro
 - Added a guard to block fuel-only `[LOGI]` deliveries when fuel displacement leaves zero requested cargo.
 - Left `FlyWithWhatIsAvailable` enabled for logistics cycles so intentionally partial loads remain possible.
 
-## SEND/GET UI And Status
+## Legacy Rule UI, Route Popup, And Status
 
-- Updated SEND/export UI wording to describe reserve behavior more accurately.
-- Allowed SEND/export rules with a reserve value of `0` instead of auto-deleting them.
+- Updated legacy outbound rule wording to describe reserve behavior more accurately.
+- Allowed legacy outbound rules with a reserve value of `0` instead of auto-deleting them.
 - Added request status text for blocked pending states such as missing spacecraft, missing launch vehicle quota, missing fuel, cooldowns, and active planning.
-- Added support for GET/in-transit status to include vehicle and arrival information where available.
+- Added support for inbound in-transit status to include vehicle and arrival information where available.
 - Matched more of the logistics UI text and section styling to the stock object-info UI.
 - Reverted problematic button color/flash changes while preserving improved text styling work.
 

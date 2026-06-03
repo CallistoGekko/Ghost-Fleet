@@ -1,28 +1,35 @@
-# Logistics Tab - Solar Expanse Mod
+# Ghost Fleet Logistics - Solar Expanse Mod
 
-A [BepInEx](https://github.com/BepInEx/BepInEx) mod for **Solar Expanse** that adds a Factorio-style logistics tab to object info windows. Configure bodies to **SEND** resources, configure other bodies to **GET** resources, and the mod plans recurring logistics shipments using your existing spacecraft, launch vehicles, orbital payload containers, and launch-assist infrastructure.
+A BepInEx mod for **Solar Expanse** that adds a route-based logistics popup to object info windows. Pick a source body, create shipping lanes to other bodies or orbits, assign route-owned spacecraft and launch vehicles, then let Ghost Fleet move resources toward per-route stock targets.
+
+This is an alpha mod. Keep backup saves.
 
 ## Current Highlights
 
-- **Single-request logistics UI**: players configure one GET request; internal relay legs remain hidden planner state.
-- **Ranked source selection**: the planner no longer takes the first usable provider. It enumerates feasible providers, scores routes, logs the rationale, and dispatches the best candidate.
-- **One orbital relay handoff**: surface stock can be lifted to that body's orbit with the orbital payload container, then carried onward by an orbit-capable spacecraft.
-- **Orbit-aware sourcing**: orbit stock is preferred over deep gravity wells when appropriate, with moon/planet/sibling relationships considered.
-- **Launch-assist support**: magnetic launch rails, spin launchers, space elevators, and similar surface infrastructure are treated as low-cost launch options.
-- **Spacecraft and launch vehicle quotas**: logistics will not exceed configured quotas and does not hide ships from the vanilla planner.
-- **Return-home cycles**: ships used for logistics are marked to return to their source object after delivery.
-- **Return fuel handling**: cargo manifests can reserve return fuel, and blocked deliveries can request fuel bootstrap shipments instead of spamming invalid cargo attempts.
-- **Useful pending reasons**: PENDING requests explain why nothing is being sent, such as no provider, no spacecraft, no LV quota, no container, or no fuel.
-- **Transit details**: GET rows can show the vehicle and expected arrival date when a delivery is actually in transit.
-- **Per-save persistence**: logistics data is saved per save file, and runtime state is cleared on load to prevent one save contaminating another.
-- **BepInEx diagnostics**: route candidates, blockers, return-home decisions, and other planner rationale are logged to the BepInEx log.
+- **Route-based logistics popup**: open Logistics from an owned object info panel, add a route, search for a destination, and manage that lane from one popup.
+- **Route resource rules**: each route resource has a source keep amount, destination target amount, active/paused state, and priority.
+- **Route-owned assets**: assign spacecraft and launch vehicles to a route. The UI shows Ready and Qty counts and releases idle assets back to the vanilla game when unassigned or when a route is removed.
+- **Ghost convoy flights**: route dispatch batches compatible craft into visible logistics traffic with compact ship, route, arrival, and cargo rows.
+- **Surface and orbit shortcuts**: same-body orbit drops and surface-to-orbit lifts can move stock directly when the route shape and launch support allow it.
+- **Launch support awareness**: normal launch vehicles, facility-backed launch vehicles, rails, spin launchers, and space elevators can contribute route lift capacity.
+- **Crew-safe cargo accounting**: human cargo consumes crew supplies and counts virtual capsule mass during payload, fuel, and launch planning.
+- **Fuel and capacity accounting**: route flights estimate travel timing, outgoing fuel, launch fuel, return fuel, and payload capacity before dispatch.
+- **Route health summaries**: rows report states like `Ready`, `Target stocked`, `Waiting for source surplus`, `Waiting for convoy launch`, `No idle vessels`, or paused state.
+- **Per-save persistence**: routes, route resources, assigned ghost assets, active flights, route paused state, and collapsed route UI state are saved per save file.
+- **Ghost upkeep accounting**: route-owned spacecraft and launch vehicles still contribute maintenance cost while they are in the ghost ledger.
 
 ## Installation
 
 1. Install BepInEx 5.x for Solar Expanse.
-2. Download a release zip and extract it into the Solar Expanse install folder, or put `LogisticsMod.dll` in `BepInEx/plugins/logisticsmod/LogisticsMod.dll`.
-3. Launch the game.
-4. Open an object's info window. The logistics controls appear under the normal object sections.
+2. Download a release zip.
+3. Extract it into the Solar Expanse install folder so the DLL lands at:
+
+```text
+BepInEx\plugins\logisticsmod\LogisticsMod.dll
+```
+
+4. Launch the game.
+5. Open an owned object's info window and click the Logistics button.
 
 ## Tester Builds
 
@@ -39,7 +46,7 @@ The zip is written to `dist/` and contains the expected `BepInEx/plugins/logisti
 The project lives under:
 
 ```text
-LogisticsMod/LogisticsMod.csproj
+LogisticsMod\LogisticsMod.csproj
 ```
 
 Build with:
@@ -48,160 +55,173 @@ Build with:
 dotnet build .\LogisticsMod\LogisticsMod.csproj -c Release -p:GameDir="I:\SteamLibrary\steamapps\common\Solar Expanse"
 ```
 
-The project is configured to deploy the main build output directly to the configured game's BepInEx plugin folder:
-
-```text
-BepInEx\plugins\logisticsmod\LogisticsMod.dll
-```
-
-After each build, the DLL and PDB are also copied to the repository root:
-
-```text
-LogisticsMod.dll
-LogisticsMod.pdb
-```
+The project deploys the main build output directly to the configured game's BepInEx plugin folder. The DLL and PDB are also copied to the repository root for local manual testing, but those files are ignored by git. Distribution builds should use `Package-Release.ps1`.
 
 ## How It Works
 
 ### Quick Start
 
-1. On a source object, open the Logistics tab and add a **SEND** provider for a resource.
-2. Set a minimum keep amount so the source does not export below local reserve.
-3. Add **SPACECRAFT** quotas for ship types logistics may use.
-4. If the source is a surface body, enable useful **LAUNCH VEHICLE** or launch-assist options.
-5. On the destination object, add a **GET** request for the resource.
-6. Let daily logistics planning run.
+1. Open the object info window for the body or orbit that should supply resources.
+2. Click Logistics.
+3. Click **+ Add Route** and choose the destination body or orbit.
+4. Open the route.
+5. Add one or more route resources.
+6. For each resource, set:
+   - **Source Keep**: stock to leave behind at the route source.
+   - **Destination Target**: stock level the route should try to maintain at the destination.
+   - **Priority**: how strongly this resource competes for available route craft.
+7. Assign route spacecraft.
+8. Assign route launch vehicles when the source needs surface launch support.
+9. Let daily logistics processing run.
 
-### UI Sections
+### Popup Flow
 
-| Section | Purpose |
+| Area | Purpose |
 | --- | --- |
-| **GET - Request Resources** | Resources this object wants delivered. Shows pending, in transit, satisfied, or failed status. |
-| **SEND - Provide Resources** | Resources this object can export, with a minimum keep reserve. |
-| **SPACECRAFT - Logistics Vessels** | Quotas for reusable spacecraft that logistics may use. |
-| **LAUNCH VEHICLE - Surface Shuttles** | Surface launch support, including normal LVs and supported launch-assist facilities. |
+| Route list | Shows shipping lanes from the selected source object. Each route can be opened, paused, collapsed, or removed. |
+| Route health | Summarizes the route's most important blocker or readiness state. |
+| Route resources | Lists resource icons plus a table with resource, priority, target, and status. |
+| Assigned spacecraft | Shows route-owned spacecraft grouped by type with Ready and Qty counts. |
+| Assigned launch vehicles | Shows route-owned launch vehicles grouped by type with Ready and Qty counts. |
+| Route Traffic | Shows active ghost flights for the route, including craft count, compact route lane, arrival date, and cargo manifest. |
 
-### Request Status
+### Route Resource Status
 
 | Status | Meaning |
 | --- | --- |
-| **PENDING** | The request needs resources, but no shipment is currently active. The row should explain the blocker. |
-| **IN TRANSIT** | A logistics cycle, relay leg, pending stock-planner job, or return-sensitive delivery is active. |
-| **SATISFIED** | The requested amount, or minimum amount for minimum-mode requests, is present. |
-| **FAILED** | Reserved for requests that cannot be completed safely. Most temporary blockers stay PENDING and retry. |
+| `Ready` | No current blocker is known. |
+| `Target stocked` | Destination stock plus in-flight cargo meets the target. |
+| `Waiting for source surplus above N` | The source does not have stock above the keep amount. |
+| `Waiting for convoy launch` | The route has demand and source stock, but a ghost convoy has not launched yet. Usually check assigned craft, launch support, fuel, or capacity. |
+| `No idle vessels` | Assigned route spacecraft exist, but none are idle at the source. |
+| `Paused` | The route or route resource is disabled. |
 
-## Routing Model
+## Route Execution Model
 
-The planner supports these v1 route shapes:
+On each in-game day, `LogisticsObserver.OnDayChange()`:
 
-- Direct spacecraft delivery.
-- Direct surface launch using a launch vehicle plus a spacecraft or orbital payload container.
-- Source-surface-to-source-orbit staging, followed by source-orbit-to-destination delivery with a normal spacecraft.
+- releases orphaned route-owned assets when possible
+- advances active ghost flights
+- refreshes ghost flight visuals
+- processes active routes
+- applies direct same-body orbit drops where valid
+- applies virtual surface-to-orbit lift when enabled and supported
+- dispatches ghost convoys with route-owned spacecraft for remaining demand
 
-The relay depth is intentionally limited to one source-side orbital handoff. There is no arbitrary graph search and no destination-side staging layer in this version.
+The current route planner is lane-based, not a global network solver. A route belongs to one source object and one destination object. Each route can carry multiple resources, and resource priority influences how limited idle craft are distributed.
 
-### Source Ranking
+## Surface And Orbit Handling
 
-For surface destinations, the planner prefers sources roughly in this order:
+The route system has three major movement paths:
 
-1. Destination body's orbit.
-2. Sibling moon orbits in the same local system.
-3. Parent planet orbit.
-4. Nearby local surfaces.
-5. External planets and orbits.
+- **Orbit drop**: source orbit to its body can move stock directly.
+- **Virtual surface lift**: body to its own orbit can move stock directly when surface lift is enabled and launch support exists.
+- **Ghost convoy flight**: route-owned spacecraft carry cargo between objects using estimated travel time, fuel, and payload checks.
 
-For orbit destinations, the planner prefers:
+Virtual surface lift is controlled by:
 
-1. Exact destination orbit.
-2. Same-body surface.
-3. Sibling moon orbits.
-4. Parent planet orbit.
-5. Broader external sources.
+```text
+BepInEx\plugins\logisticsmod\LogisticsMod.cfg
+```
 
-Within a tier, it prefers routes that avoid launch vehicles, then fewer hops, then more available stock, then stable object ordering.
+Relevant config keys:
 
-## Planner Details
-
-`LogisticsObserver.OnDayChange()` is the main daily loop. It:
-
-- attempts return-home planning for idle logistics ships
-- scans all logistics requests
-- reconciles active, pending, and in-flight deliveries
-- advances staged relay requests
-- computes outstanding demand
-- asks the route planner to create exactly one best shipment when needed
-
-`TryCreateDeliveries()` builds route candidates from all usable providers, scores them, logs the candidate table, and executes the best route that can be handed to the stock mission planner.
-
-Actual travel is still delegated to the game's cyclical mission system with `ETransferType.Optimal`. Logistics chooses the source, vehicle, launch support, cargo manifest, and relay shape; the stock planner computes the flight.
+| Section | Key | Purpose |
+| --- | --- | --- |
+| `SurfaceLift` | `Enabled` | Enables same-body surface-to-orbit direct logistics movement through launch support. |
+| `SurfaceLift` | `PayloadsPerFacilityPerDay` | Controls how many full facility-backed launch payloads each enabled launch facility can move per in-game day. |
+| `Diagnostics` | `VerboseLogging` | Writes route and dispatch diagnostics to `BepInEx/LogisticsMod_*.log`. |
 
 ## Save/Load Behavior
 
-Logistics data is stored per save under the BepInEx saves folder. On load, the mod clears:
+Logistics data is stored beside each game save:
 
-- all in-memory logistics network data
-- observer runtime state
-- pending delivery bookkeeping
-- return-home tracking
-- time-controller runtime flags
+```text
+BepInEx\saves\<SaveName>\LogisticsData.json
+```
 
-After clearing, it reloads the save's logistics JSON and reconciles existing `[LOGI]` cyclical missions back onto matching requests.
+Saved route data includes:
+
+- routes and destination ids
+- route active/paused state
+- route collapsed/expanded UI state
+- route resource rules
+- assigned ghost spacecraft
+- assigned ghost launch vehicles
+- active ghost flights
+
+Runtime-only state such as committed stock windows, request throttles, virtual lift usage, and ghost visuals is cleared on load. Post-load processing then resumes route planning.
 
 ## Diagnostics
 
-The BepInEx log includes planner rationale and runtime state transitions. Useful strings to search for:
+Enable `Diagnostics.VerboseLogging` in `BepInEx/plugins/logisticsmod/LogisticsMod.cfg` when testing difficult routes.
+
+Useful log terms:
 
 ```text
-LOGI_ROUTE
-ROUTE_CANDIDATE
-RETURNHOME
-RETURNFUEL
-BLOCKER
-UISTYLE_DUMP
+ROUTE add
+ROUTE-DROP
+ROUTE-LIFT
+GHOST convoy
+GHOST flight
+GHOST visual
+GHOST reserve-lv
+GHOST orphan cleanup
+UPKEEP ghost-ledger
+VIRTUAL-LIFT
+REQ throttle-skip
+RESET runtime-state
 ```
 
-Diagnostic config is available in `BepInEx/config/LogisticsMod.cfg`, including:
-
-| Key | Purpose |
-| --- | --- |
-| `CyclePlanningGraceDays` | Grace window for newly created cycles before stale-cycle cleanup can consider them abandoned. |
-| `VerboseLogging` | Enables extra route and state logging. |
+For tester guidance, see `TESTING.md`.
 
 ## Architecture
 
 ```text
 ObjectInfoWindow
   -> LogisticsUI
-      -> GET requests
-      -> SEND providers
-      -> spacecraft quotas
-      -> launch vehicle / launch-assist toggles
+      -> Logistics launcher button
+      -> route list
+      -> route editor
+      -> route resource rules
+      -> assigned ghost spacecraft
+      -> assigned ghost launch vehicles
+      -> route traffic rows
 
 LogisticsNetwork
-  -> in-memory logistics data keyed by ObjectInfo.id
+  -> in-memory route and ghost-ledger data keyed by ObjectInfo.id
+  -> route creation/removal
+  -> route resource rules
+  -> ghost spacecraft adoption/release
+  -> ghost launch vehicle reservation/release
+  -> orphaned route asset cleanup
 
 LogisticsPersistence
   -> per-save JSON save/load
-  -> load-time network clearing
+  -> route, asset, and flight persistence
 
 LogisticsObserver
-  -> daily logistics loop
-  -> route enumeration and ranking
-  -> relay-stage tracking
-  -> mission creation
-  -> fuel bootstrap
-  -> return-home handling
+  -> daily route processing
+  -> direct orbit drops
+  -> virtual surface lifts
+  -> ghost convoy dispatch
+  -> ghost flight completion
+  -> ghost flight visuals
+  -> route status notes
 
-SpaceCraftCyclicalMissionControllerPatches
-  -> stock planner integration
-  -> logistics mission safety hooks
+MaintenancePatches
+  -> ghost spacecraft and launch vehicle upkeep
+
+SaveLoadPatches
+  -> logistics save/load hooks
+  -> post-load route planning trigger
 ```
 
 ## Known Limitations
 
-- Only one internal orbital relay hop is supported.
-- Destination-side relay staging is not implemented.
-- The planner relies on the stock cyclical mission system for actual flight planning, so stock planner limitations still apply.
-- Return fuel behavior is conservative and may need further tuning for edge cases.
-- UI styling is still being matched to the stock game and may not be pixel-perfect yet.
-- This is an experimental mod. Keep backup saves.
+- This is alpha software and can break saves. Back up before testing.
+- Routes are source-to-destination lanes, not an arbitrary multi-hop network.
+- Surface-to-orbit lift is virtual stock movement, not a physical mission.
+- Ghost flight timing and fuel are estimates intended to mirror common vanilla route branches, not a full replacement for the game's planner.
+- Crew and return fuel behavior are conservative and need edge-case testing.
+- Some legacy save data structures still exist for compatibility, but the current player-facing workflow is route-based.
