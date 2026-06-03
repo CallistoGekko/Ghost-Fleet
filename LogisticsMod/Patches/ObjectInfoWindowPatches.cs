@@ -1,6 +1,10 @@
 using HarmonyLib;
+using Game.UI;
+using Game.UI.Screens;
+using Game.UI.Windows;
 using Game.UI.Windows.Windows;
 using LogisticsMod.Logic;
+using Manager;
 using UnityEngine;
 
 namespace LogisticsMod.Patches;
@@ -43,5 +47,61 @@ internal static class ObjectInfoWindowPatches
         var l = __instance.GetComponent<UI.LogisticsUI>();
         if (l != null && l.isActiveAndEnabled)
             l.RebuildLayout();
+    }
+}
+
+[HarmonyPatch(typeof(InputManager), "Update")]
+internal static class InputManagerPopupBlockPatch
+{
+    [HarmonyPrefix]
+    private static bool UpdatePrefix(InputManager __instance)
+    {
+        if (!UI.LogisticsUI.AnyPopupOpen || !Input.GetMouseButtonUp(0))
+            return true;
+        if (!UI.LogisticsUI.PointerIsOverPopupPanel())
+            return true;
+
+        __instance?.BlockInputForMoment();
+        return false;
+    }
+}
+
+[HarmonyPatch(typeof(UIManager), "Update")]
+internal static class UIManagerEscapePatch
+{
+    [HarmonyPrefix]
+    private static bool UpdatePrefix()
+    {
+        return !UI.LogisticsUI.ConsumeEscapeIfPopupOpen();
+    }
+}
+
+[HarmonyPatch(typeof(PauseScreen), "Update")]
+internal static class PauseScreenEscapePatch
+{
+    [HarmonyPrefix]
+    private static bool UpdatePrefix()
+    {
+        return !UI.LogisticsUI.ConsumeEscapeIfPopupOpen();
+    }
+}
+
+[HarmonyPatch(typeof(SettingsWindow), "Update")]
+internal static class SettingsWindowEscapePatch
+{
+    [HarmonyPrefix]
+    private static bool UpdatePrefix()
+    {
+        return !UI.LogisticsUI.ConsumeEscapeIfPopupOpen();
+    }
+}
+
+[HarmonyPatch(typeof(LoadSaveDialogWindow), "Update")]
+internal static class LoadSaveDialogWindowEscapePatch
+{
+    [HarmonyPrefix]
+    private static bool UpdatePrefix()
+    {
+        return !UI.LogisticsUI.ConsumeEscapeIfPopupOpen();
     }
 }

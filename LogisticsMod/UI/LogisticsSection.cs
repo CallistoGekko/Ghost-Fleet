@@ -230,6 +230,28 @@ public class LogisticsSection
         SetArrowSprite();
     }
 
+    public void HideHeader()
+    {
+        if (Root == null)
+            return;
+
+        var children = new List<GameObject>();
+        foreach (Transform child in Root.transform)
+        {
+            if (child != null && (child.gameObject.name == "Header" || child.gameObject.name == "Line"))
+                children.Add(child.gameObject);
+        }
+
+        foreach (var child in children)
+            Object.DestroyImmediate(child);
+
+        _arrowImage = null;
+        _arrowText = null;
+        SetExpanded(true);
+        if (_parentRt != null)
+            LayoutRebuilder.ForceRebuildLayoutImmediate(_parentRt);
+    }
+
     private void SetArrowSprite()
     {
         if (_arrowImage != null)

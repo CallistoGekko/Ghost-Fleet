@@ -5,11 +5,11 @@ using CustomUpdate;
 using Game;
 using Game.Info;
 using Game.ObjectInfoDataScripts;
-using Game.UI.Windows.Elements.PlanMissionElements;
 using LogisticsMod.Logic;
 using Manager;
 using ScriptableObjectScripts;
 using UnityEngine;
+using LaunchVehicleType = global::Data.ScriptableObject.LaunchVehicleType;
 
 namespace LogisticsMod.Data;
 
@@ -94,57 +94,638 @@ public static class LogisticsNetwork
             data.providers.RemoveAt(index);
     }
 
-    public static List<ShipQuotaEntry> GetQuotas(ObjectInfo oi, bool isSpacecraft)
+    public static int NextRouteId()
     {
-        var data = GetOrCreate(oi);
-        return isSpacecraft ? data.spacecraftQuota : data.launchVehicleQuota;
-    }
-
-    public static int GetQuota(ObjectInfo oi, string typeName, bool isSpacecraft)
-    {
-        var data = Get(oi);
-        if (data == null) return 0;
-        var quotas = isSpacecraft ? data.spacecraftQuota : data.launchVehicleQuota;
-        var entry = quotas.Find(q => q.typeName == typeName);
-        return entry?.count ?? 0;
-    }
-
-    public static ShipQuotaEntry GetQuotaEntry(ObjectInfo oi, string typeName, bool isSpacecraft)
-    {
-        var data = Get(oi);
-        if (data == null) return null;
-        var quotas = isSpacecraft ? data.spacecraftQuota : data.launchVehicleQuota;
-        return quotas.Find(q => q.typeName == typeName);
-    }
-
-    public static void SetQuota(ObjectInfo oi, string typeName, int count, bool isSpacecraft)
-    {
-        var quotas = GetQuotas(oi, isSpacecraft);
-        var entry = quotas.Find(q => q.typeName == typeName);
-        if (entry != null)
-            entry.count = count;
-        else if (count > 0)
-            quotas.Add(new ShipQuotaEntry { typeName = typeName, count = count });
-    }
-
-    public static void SetQuotaTransferPreference(ObjectInfo oi, string typeName, bool isSpacecraft, bool useFastestTransfer)
-    {
-        var quotas = GetQuotas(oi, isSpacecraft);
-        var entry = quotas.Find(q => q.typeName == typeName);
-        if (entry == null)
+        var max = 0;
+        foreach (var data in _dataByObject.Values)
         {
-            entry = new ShipQuotaEntry { typeName = typeName, count = 1 };
-            quotas.Add(entry);
+            if (data?.routes == null) continue;
+            foreach (var route in data.routes)
+                if (route != null && route.routeId > max)
+                    max = route.routeId;
         }
-        entry.useFastestTransfer = useFastestTransfer;
+        return max + 1;
     }
 
-    public static void RemoveQuota(ObjectInfo oi, string typeName, bool isSpacecraft)
+    public static LogisticsRouteRecord AddRoute(ObjectInfo source, ObjectInfo destination)
     {
-        var data = Get(oi);
-        if (data == null) return;
-        var quotas = isSpacecraft ? data.spacecraftQuota : data.launchVehicleQuota;
-        quotas.RemoveAll(q => q.typeName == typeName);
+        if (source == null || destination == null || source == destination)
+            return null;
+
+        var data = GetOrCreate(source);
+        data.routes ??= new List<LogisticsRouteRecord>();
+        var existing = data.routes.FirstOrDefault(route => route != null
+            && route.sourceObjectId == source.id
+            && route.destinationObjectId == destination.id);
+        if (existing != null)
+            return existing;
+
+        GetOrCreate(destination);
+        var record = new LogisticsRouteRecord
+        {
+            routeId = NextRouteId(),
+            sourceObjectId = source.id,
+            destinationObjectId = destination.id,
+            isActive = true
+        };
+        data.routes.Add(record);
+        LogisticsObserver.Log($"ROUTE add: id={record.routeId} {source.ObjectName}->{destination.ObjectName}");
+        return record;
+    }
+
+    public static void RemoveRoute(ObjectInfo source, int routeId)
+    {
+        var data = Get(source);
+        if (data?.routes == null)
+            return;
+
+        var route = data.routes.FirstOrDefault(r => r != null && r.routeId == routeId);
+        if (route == null)
+            return;
+
+        foreach (var craft in GetAllGhostCraft().Where(c => c != null && c.assignedRouteId == routeId).ToList())
+        {
+            if (!ReleaseGhostCraft(source, craft.ledgerId, out var reason))
+            {
+                craft.assignedRouteId = -1;
+                LogisticsObserver.LogWarning($"ROUTE remove orphaned craft pending release: route={routeId} ship={craft.shipName ?? craft.shipTypeId} reason={reason}");
+            }
+        }
+        foreach (var lv in GetAllGhostLaunchVehicles().Where(lv => lv != null && lv.assignedRouteId == routeId).ToList())
+        {
+            if (!ReleaseGhostLaunchVehicle(source, lv.ledgerId, out var reason))
+            {
+                lv.assignedRouteId = -1;
+                LogisticsObserver.LogWarning($"ROUTE remove orphaned lv pending release: route={routeId} lv={lv.typeName ?? lv.launchVehicleTypeId} reason={reason}");
+            }
+        }
+
+        data.routes.Remove(route);
+        LogisticsObserver.Log($"ROUTE remove: id={routeId} source={source.ObjectName}");
+    }
+
+    public static void ReleaseOrphanedRouteAssets()
+    {
+        var validRouteIds = new HashSet<int>(GetAllRoutes().Select(route => route.routeId));
+        var releasedCraft = 0;
+        var releasedLaunchVehicles = 0;
+        var pending = 0;
+
+        foreach (var owner in GetAllObjects().ToList())
+        {
+            var data = Get(owner);
+            if (owner == null || data == null)
+                continue;
+
+            foreach (var craft in (data.ghostCraft ?? new List<GhostCraftRecord>()).ToList())
+            {
+                if (craft == null || craft.status == GhostCraftStatus.Retired)
+                    continue;
+                if (craft.assignedRouteId > 0 && validRouteIds.Contains(craft.assignedRouteId))
+                    continue;
+
+                craft.assignedRouteId = -1;
+                if (craft.status == GhostCraftStatus.IdleAtHome || craft.status == GhostCraftStatus.Blocked)
+                {
+                    if (ReleaseGhostCraft(owner, craft.ledgerId, out var reason))
+                        releasedCraft++;
+                    else
+                    {
+                        pending++;
+                        LogisticsObserver.LogWarning($"GHOST orphan-craft release failed: owner={owner.ObjectName} ship={craft.shipName ?? craft.shipTypeId} reason={reason}");
+                    }
+                }
+                else
+                {
+                    pending++;
+                }
+            }
+
+            RefreshReservedLaunchVehicles(data);
+            foreach (var lv in (data.ghostLaunchVehicles ?? new List<GhostLaunchVehicleRecord>()).ToList())
+            {
+                if (lv == null || lv.status == GhostLaunchVehicleStatus.Retired)
+                    continue;
+                if (lv.assignedRouteId > 0 && validRouteIds.Contains(lv.assignedRouteId))
+                    continue;
+
+                lv.assignedRouteId = -1;
+                if (ReleaseGhostLaunchVehicle(owner, lv.ledgerId, out var reason))
+                    releasedLaunchVehicles++;
+                else
+                {
+                    pending++;
+                    LogisticsObserver.LogWarning($"GHOST orphan-lv release failed: owner={owner.ObjectName} lv={lv.typeName ?? lv.launchVehicleTypeId} reason={reason}");
+                }
+            }
+        }
+
+        if (releasedCraft > 0 || releasedLaunchVehicles > 0 || pending > 0)
+            LogisticsObserver.Log($"GHOST orphan cleanup: releasedCraft={releasedCraft} releasedLV={releasedLaunchVehicles} pending={pending}");
+    }
+
+    public static IEnumerable<LogisticsRouteRecord> GetAllRoutes()
+    {
+        return _dataByObject.Values
+            .Where(data => data?.routes != null)
+            .SelectMany(data => data.routes)
+            .Where(route => route != null);
+    }
+
+    public static LogisticsRouteRecord FindRoute(int routeId)
+    {
+        if (routeId <= 0)
+            return null;
+        return GetAllRoutes().FirstOrDefault(route => route.routeId == routeId);
+    }
+
+    public static LogisticsRouteResourceRule AddRouteResource(LogisticsRouteRecord route,
+        ResourceDefinition rd, double sourceKeep, double destinationTarget)
+    {
+        if (route == null || rd == null)
+            return null;
+
+        route.resources ??= new List<LogisticsRouteResourceRule>();
+        var existing = route.resources.FirstOrDefault(rule => rule != null
+            && string.Equals(rule.ResourceDefinition?.ID ?? rule.resourceDef?.id, rd.ID, StringComparison.Ordinal));
+        if (existing == null)
+        {
+            existing = new LogisticsRouteResourceRule
+            {
+                resourceDef = rd,
+                ResourceDefinition = rd,
+                isActive = true
+            };
+            route.resources.Add(existing);
+        }
+
+        existing.sourceKeep = Math.Max(0, sourceKeep);
+        existing.destinationTarget = Math.Max(0, destinationTarget);
+        existing.statusNote = null;
+        return existing;
+    }
+
+    public static void RemoveRouteResource(LogisticsRouteRecord route, int index)
+    {
+        if (route?.resources == null || index < 0 || index >= route.resources.Count)
+            return;
+        route.resources.RemoveAt(index);
+    }
+
+    public static bool AssignGhostCraftToRoute(int routeId, GhostCraftRecord craft, out string reason)
+    {
+        reason = null;
+        var route = FindRoute(routeId);
+        if (route == null || craft == null)
+        {
+            reason = "Route or spacecraft is unavailable";
+            return false;
+        }
+
+        if (craft.status != GhostCraftStatus.IdleAtHome || craft.currentObjectId != route.sourceObjectId)
+        {
+            reason = "Spacecraft must be idle at the route source";
+            return false;
+        }
+
+        craft.assignedRouteId = routeId;
+        return true;
+    }
+
+    public static bool UnassignGhostCraftFromRoute(int routeId, GhostCraftRecord craft, out string reason)
+    {
+        reason = null;
+        if (craft == null || craft.assignedRouteId != routeId)
+        {
+            reason = "Spacecraft is not assigned to this route";
+            return false;
+        }
+
+        if (craft.status != GhostCraftStatus.IdleAtHome)
+        {
+            reason = "Spacecraft must be idle before leaving a route";
+            return false;
+        }
+
+        craft.assignedRouteId = -1;
+        return true;
+    }
+
+    public static bool AssignGhostLaunchVehicleToRoute(int routeId, GhostLaunchVehicleRecord launchVehicle, out string reason)
+    {
+        reason = null;
+        var route = FindRoute(routeId);
+        if (route == null || launchVehicle == null)
+        {
+            reason = "Route or launch vehicle is unavailable";
+            return false;
+        }
+
+        if (launchVehicle.status == GhostLaunchVehicleStatus.Retired || launchVehicle.currentObjectId != route.sourceObjectId)
+        {
+            reason = "Launch vehicle must be available at the route source";
+            return false;
+        }
+
+        launchVehicle.assignedRouteId = routeId;
+        return true;
+    }
+
+    public static bool UnassignGhostLaunchVehicleFromRoute(int routeId, GhostLaunchVehicleRecord launchVehicle, out string reason)
+    {
+        reason = null;
+        if (launchVehicle == null || launchVehicle.assignedRouteId != routeId)
+        {
+            reason = "Launch vehicle is not assigned to this route";
+            return false;
+        }
+
+        if (launchVehicle.status == GhostLaunchVehicleStatus.Retired)
+        {
+            reason = "Launch vehicle is no longer available";
+            return false;
+        }
+
+        launchVehicle.assignedRouteId = -1;
+        return true;
+    }
+
+    public static int NextGhostCraftId()
+    {
+        var max = 0;
+        foreach (var data in _dataByObject.Values)
+        {
+            if (data?.ghostCraft == null) continue;
+            foreach (var craft in data.ghostCraft)
+                if (craft != null && craft.ledgerId > max)
+                    max = craft.ledgerId;
+        }
+        return max + 1;
+    }
+
+    public static GhostCraftRecord FindGhostCraft(int ledgerId)
+    {
+        foreach (var data in _dataByObject.Values)
+        {
+            var found = data?.ghostCraft?.FirstOrDefault(c => c != null && c.ledgerId == ledgerId);
+            if (found != null)
+                return found;
+        }
+        return null;
+    }
+
+    public static IEnumerable<GhostCraftRecord> GetAllGhostCraft()
+    {
+        return _dataByObject.Values
+            .Where(data => data?.ghostCraft != null)
+            .SelectMany(data => data.ghostCraft)
+            .Where(craft => craft != null);
+    }
+
+    public static IEnumerable<GhostFlightRecord> GetAllGhostFlights()
+    {
+        return _dataByObject.Values
+            .Where(data => data?.ghostFlights != null)
+            .SelectMany(data => data.ghostFlights)
+            .Where(flight => flight != null);
+    }
+
+    public static int NextGhostLaunchVehicleId()
+    {
+        var max = 0;
+        foreach (var data in _dataByObject.Values)
+        {
+            if (data?.ghostLaunchVehicles == null) continue;
+            foreach (var lv in data.ghostLaunchVehicles)
+                if (lv != null && lv.ledgerId > max)
+                    max = lv.ledgerId;
+        }
+        return max + 1;
+    }
+
+    public static IEnumerable<GhostLaunchVehicleRecord> GetAllGhostLaunchVehicles()
+    {
+        return _dataByObject.Values
+            .Where(data => data?.ghostLaunchVehicles != null)
+            .SelectMany(data => data.ghostLaunchVehicles)
+            .Where(lv => lv != null);
+    }
+
+    public static void RefreshReservedLaunchVehicles(LogisticsObjectData data)
+    {
+        if (data?.ghostLaunchVehicles == null)
+            return;
+
+        var now = MonoBehaviourSingleton<TimeController>.Instance?.CurrentTime ?? DateTime.Now;
+        foreach (var lv in data.ghostLaunchVehicles)
+        {
+            if (lv == null || lv.status != GhostLaunchVehicleStatus.CoolingDown)
+                continue;
+            if (lv.availableDate <= now)
+            {
+                lv.status = GhostLaunchVehicleStatus.Ready;
+                lv.blockedReason = null;
+            }
+        }
+        data.ghostLaunchVehicles.RemoveAll(lv => lv == null || lv.status == GhostLaunchVehicleStatus.Retired);
+    }
+
+    public static bool IsGhostLaunchVehicleReady(GhostLaunchVehicleRecord record, DateTime now)
+    {
+        if (record == null || record.status == GhostLaunchVehicleStatus.Retired)
+            return false;
+        if (record.status == GhostLaunchVehicleStatus.CoolingDown && record.availableDate > now)
+            return false;
+        return true;
+    }
+
+    public static bool ReserveLaunchVehicle(ObjectInfo home, LaunchVehicle lv, out string reason, int assignedRouteId = -1)
+    {
+        var player = MonoBehaviourSingleton<GameManager>.Instance?.Player;
+        if (!IsLaunchVehicleReservableAt(home, lv, player, out reason))
+            return false;
+
+        var data = GetOrCreate(home);
+        var record = new GhostLaunchVehicleRecord
+        {
+            ledgerId = NextGhostLaunchVehicleId(),
+            originalLaunchVehicleId = lv.ID,
+            typeName = lv.launchVehicleType.Name,
+            launchVehicleTypeId = lv.launchVehicleType.ID,
+            homeObjectId = home.id,
+            currentObjectId = home.id,
+            availableDate = MonoBehaviourSingleton<TimeController>.Instance?.CurrentTime ?? DateTime.Now,
+            status = GhostLaunchVehicleStatus.Ready,
+            assignedRouteId = assignedRouteId
+        };
+        data.ghostLaunchVehicles.Add(record);
+
+        home.RemoveRocket(lv);
+        UnityEngine.Object.Destroy(lv.gameObject);
+        LogisticsObserver.Log($"GHOST reserve-lv: body={home.ObjectName} lv={record.typeName} type={record.launchVehicleTypeId} id={record.ledgerId} original={record.originalLaunchVehicleId}");
+        return true;
+    }
+
+    public static bool IsLaunchVehicleReservableAt(ObjectInfo home, LaunchVehicle lv, Company player, out string reason)
+    {
+        reason = null;
+        if (home == null || lv == null || player == null)
+        {
+            reason = "No launch vehicle selected";
+            return false;
+        }
+
+        if (lv.company != player)
+        {
+            reason = "Only player launch vehicles can be reserved";
+            return false;
+        }
+
+        if (lv.launchVehicleType == null)
+        {
+            reason = "Launch vehicle has no type";
+            return false;
+        }
+
+        if (lv.objectInfo != home)
+        {
+            reason = "Launch vehicle is not at this logistics body";
+            return false;
+        }
+
+        if (lv.launchVehicleType.FakeForFacility || home.GetObjectInfoData(player)?.GetFakeLVFromFacilityReverse(lv) != null)
+        {
+            reason = "Facility launch capacity is shared automatically";
+            return false;
+        }
+
+        if (lv.spacecraft != null)
+        {
+            reason = "Launch vehicle already has a spacecraft assigned";
+            return false;
+        }
+
+        if (!home.ListLaunchVehicle.Contains(lv))
+        {
+            reason = "Launch vehicle is not resting in this body's ready list";
+            return false;
+        }
+
+        if (!lv.IsReadyToLaunchReusable())
+        {
+            reason = "Launch vehicle is not ready";
+            return false;
+        }
+
+        return true;
+    }
+
+    public static bool ReleaseGhostLaunchVehicle(ObjectInfo owner, int ledgerId, out string reason)
+    {
+        reason = null;
+        var player = MonoBehaviourSingleton<GameManager>.Instance?.Player;
+        if (owner == null || player == null)
+        {
+            reason = "No logistics body selected";
+            return false;
+        }
+
+        var ownerData = Get(owner);
+        RefreshReservedLaunchVehicles(ownerData);
+        var record = ownerData?.ghostLaunchVehicles?.FirstOrDefault(lv => lv != null && lv.ledgerId == ledgerId);
+        if (record == null)
+        {
+            reason = "Reserved launch vehicle not found";
+            return false;
+        }
+
+        var now = MonoBehaviourSingleton<TimeController>.Instance?.CurrentTime ?? DateTime.Now;
+        if (!IsGhostLaunchVehicleReady(record, now))
+        {
+            reason = "Launch vehicle must be ready before release";
+            return false;
+        }
+
+        var location = MonoBehaviourSingleton<ObjectInfoManager>.Instance?.GetByID(record.currentObjectId);
+        if (location == null)
+        {
+            reason = "Current ledger location no longer exists";
+            return false;
+        }
+
+        var lvType = ResolveLaunchVehicleType(record.launchVehicleTypeId);
+        if (lvType == null)
+        {
+            reason = "Launch vehicle type no longer exists";
+            return false;
+        }
+
+        var created = location.AddRocket(lvType, location, player);
+        if (created == null)
+        {
+            reason = "Could not recreate launch vehicle";
+            return false;
+        }
+
+        ownerData.ghostLaunchVehicles.Remove(record);
+        LogisticsObserver.Log($"GHOST release-lv: body={owner.ObjectName} lv={created.launchVehicleType?.Name ?? record.typeName} at={location.ObjectName}");
+        return true;
+    }
+
+    private static LaunchVehicleType ResolveLaunchVehicleType(string typeId)
+    {
+        if (string.IsNullOrWhiteSpace(typeId))
+            return null;
+        return SerializedMonoBehaviourSingleton<AllScriptableObjectManager>.Instance?.AllLaunchVehicleType?.GetByID(typeId);
+    }
+
+    public static bool AdoptSpacecraft(ObjectInfo home, Spacecraft sc, out string reason)
+    {
+        var player = MonoBehaviourSingleton<GameManager>.Instance?.Player;
+        if (!IsSpacecraftAdoptableAt(home, sc, player, out reason))
+            return false;
+
+        var data = GetOrCreate(home);
+        var fuelType = sc.spacecraftType.GetFuelType();
+        var tankFuel = fuelType == null ? 0 : Math.Max(0, sc.CargoAll?.cargoFuel?.cargoMass ?? 0);
+        var record = new GhostCraftRecord
+        {
+            ledgerId = NextGhostCraftId(),
+            originalShipId = sc.ID,
+            originalName = sc.GetSpacecraftName(),
+            shipName = sc.GetSpacecraftName(),
+            shipTypeId = sc.spacecraftType.ID,
+            homeObjectId = home.id,
+            currentObjectId = home.id,
+            tankFuel = tankFuel,
+            tankFuelCapacity = sc.spacecraftType.GetFuelCapacity(player),
+            status = GhostCraftStatus.IdleAtHome
+        };
+        data.ghostCraft.Add(record);
+
+        home.GetObjectInfoData(player)?.RemoveSpacecraft(sc);
+        MonoBehaviourSingleton<ShipManager>.Instance?.RemoveSpacecraft(sc);
+        LogisticsObserver.Log($"GHOST adopt: body={home.ObjectName} ship={record.shipName} type={record.shipTypeId} id={record.ledgerId} original={record.originalShipId} tank={record.tankFuel:0.#}/{record.tankFuelCapacity:0.#}");
+        return true;
+    }
+
+    public static bool IsSpacecraftAdoptableAt(ObjectInfo home, Spacecraft sc, Company player, out string reason)
+    {
+        reason = null;
+        if (home == null || sc == null || player == null)
+        {
+            reason = "No spacecraft selected";
+            return false;
+        }
+
+        if (sc.GetCompany() != player)
+        {
+            reason = "Only player spacecraft can be adopted";
+            return false;
+        }
+
+        if (sc.spacecraftType == null)
+        {
+            reason = "Spacecraft has no type";
+            return false;
+        }
+
+        if (sc.CurrentlyOnThisObject != home)
+        {
+            reason = "Spacecraft is not at this logistics body";
+            return false;
+        }
+
+        if (!IsSpacecraftRestingIdleAt(home, sc, player, out reason))
+            return false;
+
+        return true;
+    }
+
+    private static bool IsSpacecraftRestingIdleAt(ObjectInfo home, Spacecraft sc, Company player, out string reason)
+    {
+        reason = null;
+        var objectData = home?.GetObjectInfoData(player);
+        if (objectData?.ListSpaceCrafts == null || !objectData.ListSpaceCrafts.Contains(sc))
+        {
+            reason = "Spacecraft is not resting in this body's idle ship list";
+            return false;
+        }
+
+        if (sc.spacecraftType.LowOrbitContainer || sc.spacecraftType.MagneticCatapult || sc.scFromFacility)
+        {
+            reason = "Spacecraft is not a normal idle vessel";
+            return false;
+        }
+
+        if (sc.CurrentPhase != Spacecraft.EPhase.None)
+        {
+            reason = "Spacecraft is not idle";
+            return false;
+        }
+
+        return true;
+    }
+
+    public static bool ReleaseGhostCraft(ObjectInfo owner, int ledgerId, out string reason)
+    {
+        reason = null;
+        var player = MonoBehaviourSingleton<GameManager>.Instance?.Player;
+        if (owner == null || player == null)
+        {
+            reason = "No logistics body selected";
+            return false;
+        }
+
+        var ownerData = Get(owner);
+        var craft = ownerData?.ghostCraft?.FirstOrDefault(c => c != null && c.ledgerId == ledgerId);
+        if (craft == null)
+        {
+            reason = "Ghost craft not found";
+            return false;
+        }
+
+        if (craft.status != GhostCraftStatus.IdleAtHome && craft.status != GhostCraftStatus.Blocked)
+        {
+            reason = "Craft must be idle before release";
+            return false;
+        }
+
+        var location = MonoBehaviourSingleton<ObjectInfoManager>.Instance?.GetByID(craft.currentObjectId);
+        if (location == null)
+        {
+            reason = "Current ledger location no longer exists";
+            return false;
+        }
+
+        var scType = SerializedMonoBehaviourSingleton<AllScriptableObjectManager>.Instance?.AllSpacecraftType?.GetByID(craft.shipTypeId);
+        if (scType == null)
+        {
+            reason = "Spacecraft type no longer exists";
+            return false;
+        }
+
+        var created = MonoBehaviourSingleton<ShipManager>.Instance?.ConstructShipOnPlanet(location, scType, null, player) as Spacecraft;
+        if (created == null)
+        {
+            reason = "Could not recreate spacecraft";
+            return false;
+        }
+
+        created.spacecraftName = string.IsNullOrWhiteSpace(craft.shipName) ? craft.originalName : craft.shipName;
+        var cargo = CargoAll.CreateCargoEmpty();
+        if (cargo?.cargoFuel != null && scType.GetFuelType() != null)
+        {
+            cargo.cargoFuel.resourceTypeType = EResourceTypeType.resorces;
+            cargo.cargoFuel.resourceType = scType.GetFuelType();
+            cargo.cargoFuel.cargoMass = Math.Min(Math.Max(0, craft.tankFuel), scType.GetFuelCapacity(player));
+            cargo.cargoFuel.cargoMassPotencjal = cargo.cargoFuel.cargoMass;
+        }
+        created.SetTabCargo(cargo);
+
+        ownerData.ghostCraft.Remove(craft);
+        LogisticsObserver.Log($"GHOST release: body={owner.ObjectName} ship={created.GetSpacecraftName()} type={craft.shipTypeId} at={location.ObjectName} tank={craft.tankFuel:0.#}");
+        return true;
     }
 
     public static void ClearAll()
@@ -201,133 +782,6 @@ public static class LogisticsNetwork
                 result.Add(rd);
         }
         return result;
-    }
-
-    public static Dictionary<string, int> GetShipTypeCountsOnObject(ObjectInfo oi, bool isSpacecraft)
-    {
-        var result = new Dictionary<string, int>();
-        if (oi == null) return result;
-        var player = MonoBehaviourSingleton<GameManager>.Instance?.Player;
-        if (player == null) return result;
-
-        if (isSpacecraft)
-        {
-            var cm = MonoBehaviourSingleton<CycleMissionManager>.Instance;
-            foreach (var sc in UnityEngine.Object.FindObjectsOfType<Spacecraft>())
-            {
-                if (sc == null || sc.spacecraftType == null) continue;
-                if (sc.GetCompany() != player) continue;
-                if (sc.CurrentlyOnThisObject != oi) continue;
-                if (!IsSpacecraftReadyForLogistics(sc, player, cm)) continue;
-                var tn = TypeKey(sc.spacecraftType.ID, sc.spacecraftType.NameRocketType ?? "SC");
-                if (!result.ContainsKey(tn)) result[tn] = 0;
-                result[tn]++;
-            }
-        }
-        else
-        {
-            var rows = oi.GetListLaunchVehicle(player);
-            if (rows == null) return result;
-
-            foreach (var row in rows)
-            {
-                var lv = row?.launchVehicle;
-                if (lv == null || lv.launchVehicleType == null) continue;
-                if (lv.GetCompany() != player) continue;
-                if (lv.objectInfo != oi) continue;
-                if (!lv.IsReadyToLaunchReusable()) continue;
-                var tn = TypeKey(lv.launchVehicleType.ID, lv.launchVehicleType.Name ?? "LV");
-                if (!result.ContainsKey(tn)) result[tn] = 0;
-                result[tn]++;
-            }
-        }
-        return result;
-    }
-
-    public static int GetReadySpacecraftCountForQuota(ObjectInfo oi, ShipQuotaEntry quota)
-    {
-        if (oi == null || quota == null) return 0;
-        var player = MonoBehaviourSingleton<GameManager>.Instance?.Player;
-        if (player == null) return 0;
-        var cm = MonoBehaviourSingleton<CycleMissionManager>.Instance;
-        var count = 0;
-
-        foreach (var sc in UnityEngine.Object.FindObjectsOfType<Spacecraft>())
-        {
-            if (sc == null || sc.spacecraftType == null) continue;
-            if (sc.GetCompany() != player) continue;
-            if (sc.CurrentlyOnThisObject != oi) continue;
-            if (!IsSpacecraftReadyForLogistics(sc, player, cm)) continue;
-            if (!QuotaMatches(quota, sc.spacecraftType.ID, sc.spacecraftType.NameRocketType ?? "SC")) continue;
-            count++;
-        }
-
-        return count;
-    }
-
-    private static bool IsSpacecraftReadyForLogistics(Spacecraft sc, Company player, CycleMissionManager cm)
-    {
-        if (sc == null || sc.spacecraftType == null || player == null) return false;
-        if (sc.GetCompany() != player) return false;
-        if (sc.CurrentPhase != Spacecraft.EPhase.None) return false;
-
-        var directCycle = cm?.GetCycleMission(sc);
-        if (directCycle != null && !directCycle.CheckComplete()) return false;
-
-        var controllerCycle = sc.CraftCyclicalMissionController?.CycleMissionsData;
-        if (controllerCycle != null && !controllerCycle.CheckComplete()) return false;
-
-        if (cm == null) return true;
-        foreach (var cmd in cm.GetAllCycleMission(player))
-        {
-            if (cmd == null || cmd.CheckComplete() || cmd.ListSC == null)
-                continue;
-
-            foreach (var sci in cmd.ListSC)
-            {
-                if (sci is not Spacecraft other)
-                    continue;
-                if (ReferenceEquals(sc, other))
-                    return false;
-                if (sc.ID >= 0 && other.ID >= 0 && sc.ID == other.ID)
-                    return false;
-            }
-        }
-
-        return true;
-    }
-
-    public static bool ObjectRequiresLVForLaunch(ObjectInfo oi)
-    {
-        return oi?.NeedVehicleToLaunch() ?? false;
-    }
-
-    public static string TypeKey(string id, string fallbackName)
-    {
-        return !string.IsNullOrEmpty(id) ? id : fallbackName;
-    }
-
-    public static bool QuotaMatches(ShipQuotaEntry quota, string id, string fallbackName)
-    {
-        if (quota == null) return false;
-        var key = TypeKey(id, fallbackName);
-        return SameQuotaKey(quota.typeName, key) || SameQuotaKey(quota.typeName, fallbackName);
-    }
-
-    public static int ActiveCountFor(Dictionary<string, int> active, string id, string fallbackName)
-    {
-        var result = 0;
-        if (active == null) return 0;
-        active.TryGetValue(TypeKey(id, fallbackName), out result);
-        if (!string.IsNullOrEmpty(fallbackName) && active.TryGetValue(fallbackName, out var legacy))
-            result += legacy;
-        return result;
-    }
-
-    private static bool SameQuotaKey(string a, string b)
-    {
-        if (string.IsNullOrWhiteSpace(a) || string.IsNullOrWhiteSpace(b)) return false;
-        return string.Equals(a.Trim(), b.Trim(), StringComparison.OrdinalIgnoreCase);
     }
 
     public static HashSet<ResourceDefinition> GetNetworkResourcesSet(Company player)

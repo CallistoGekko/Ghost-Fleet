@@ -1,0 +1,12 @@
+bin/
+obj/
+dist/
+build-output/
+
+*.user
+*.suo
+*.cache
+
+# Local build artifacts copied after build for quick manual testing.
+/LogisticsMod.dll
+/LogisticsMod.pdb

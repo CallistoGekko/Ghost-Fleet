@@ -32,8 +32,10 @@ public static class LogisticsPersistence
         public int objectId;
         public List<SavedRequest> requests = new List<SavedRequest>();
         public List<SavedProvider> providers = new List<SavedProvider>();
-        public List<SavedQuota> spacecraftQuota = new List<SavedQuota>();
-        public List<SavedQuota> launchVehicleQuota = new List<SavedQuota>();
+        public List<GhostCraftRecord> ghostCraft = new List<GhostCraftRecord>();
+        public List<GhostLaunchVehicleRecord> ghostLaunchVehicles = new List<GhostLaunchVehicleRecord>();
+        public List<GhostFlightRecord> ghostFlights = new List<GhostFlightRecord>();
+        public List<SavedRoute> routes = new List<SavedRoute>();
     }
 
     [Serializable]
@@ -44,10 +46,6 @@ public static class LogisticsPersistence
         public double minimumAmount;
         public bool useMinimumAmount;
         public int status;
-        public int relayStage;
-        public int relaySourceObjectId;
-        public int relayOrbitObjectId;
-        public int relayFinalTargetObjectId;
     }
 
     [Serializable]
@@ -59,11 +57,24 @@ public static class LogisticsPersistence
     }
 
     [Serializable]
-    private class SavedQuota
+    private class SavedRoute
     {
-        public string typeName;
-        public int count;
-        public bool useFastestTransfer;
+        public int routeId;
+        public int sourceObjectId;
+        public int destinationObjectId;
+        public bool active;
+        public bool collapsed;
+        public List<SavedRouteResource> resources = new List<SavedRouteResource>();
+    }
+
+    [Serializable]
+    private class SavedRouteResource
+    {
+        public string resourceId;
+        public double sourceKeep;
+        public double destinationTarget;
+        public bool active;
+        public int priority;
     }
 
     public static void Save(string saveName)
@@ -101,11 +112,7 @@ public static class LogisticsPersistence
                         amount = r.requestedAmount,
                         minimumAmount = r.minimumAmount,
                         useMinimumAmount = r.useMinimumAmount,
-                        status = (int)r.status,
-                        relayStage = (int)r.relayStage,
-                        relaySourceObjectId = r.relaySourceObjectId,
-                        relayOrbitObjectId = r.relayOrbitObjectId,
-                        relayFinalTargetObjectId = r.relayFinalTargetObjectId
+                        status = (int)r.status
                     });
                 }
 
@@ -119,11 +126,43 @@ public static class LogisticsPersistence
                     });
                 }
 
-                foreach (var q in ld.spacecraftQuota)
-                    so.spacecraftQuota.Add(new SavedQuota { typeName = q.typeName, count = q.count, useFastestTransfer = q.useFastestTransfer });
+                foreach (var craft in ld.ghostCraft)
+                    so.ghostCraft.Add(craft);
 
-                foreach (var q in ld.launchVehicleQuota)
-                    so.launchVehicleQuota.Add(new SavedQuota { typeName = q.typeName, count = q.count, useFastestTransfer = q.useFastestTransfer });
+                foreach (var lv in ld.ghostLaunchVehicles)
+                    so.ghostLaunchVehicles.Add(lv);
+
+                foreach (var flight in ld.ghostFlights)
+                    so.ghostFlights.Add(flight);
+
+                foreach (var route in ld.routes ?? new List<LogisticsRouteRecord>())
+                {
+                    if (route == null)
+                        continue;
+
+                    var savedRoute = new SavedRoute
+                    {
+                        routeId = route.routeId,
+                        sourceObjectId = route.sourceObjectId,
+                        destinationObjectId = route.destinationObjectId,
+                        active = route.isActive,
+                        collapsed = route.uiCollapsed
+                    };
+                    foreach (var rule in route.resources ?? new List<LogisticsRouteResourceRule>())
+                    {
+                        if (rule == null)
+                            continue;
+                        savedRoute.resources.Add(new SavedRouteResource
+                        {
+                            resourceId = rule.ResourceDefinition?.ID ?? rule.resourceDef?.id,
+                            sourceKeep = rule.sourceKeep,
+                            destinationTarget = rule.destinationTarget,
+                            active = rule.isActive,
+                            priority = rule.priority
+                        });
+                    }
+                    so.routes.Add(savedRoute);
+                }
 
                 data.objects.Add(so);
             }
@@ -179,11 +218,7 @@ public static class LogisticsPersistence
                         requestedAmount = sr.amount,
                         minimumAmount = sr.minimumAmount,
                         useMinimumAmount = sr.useMinimumAmount,
-                        status = (LogisticsRequestStatus)sr.status,
-                        relayStage = (RelayStage)sr.relayStage,
-                        relaySourceObjectId = sr.relaySourceObjectId,
-                        relayOrbitObjectId = sr.relayOrbitObjectId,
-                        relayFinalTargetObjectId = sr.relayFinalTargetObjectId
+                        status = (LogisticsRequestStatus)sr.status
                     });
                 }
 
@@ -199,11 +234,46 @@ public static class LogisticsPersistence
                     });
                 }
 
-                foreach (var sq in so.spacecraftQuota)
-                    ld.spacecraftQuota.Add(new ShipQuotaEntry { typeName = sq.typeName, count = sq.count, useFastestTransfer = sq.useFastestTransfer });
+                if (so.ghostCraft != null)
+                    ld.ghostCraft.AddRange(so.ghostCraft);
 
-                foreach (var sq in so.launchVehicleQuota)
-                    ld.launchVehicleQuota.Add(new ShipQuotaEntry { typeName = sq.typeName, count = sq.count, useFastestTransfer = sq.useFastestTransfer });
+                if (so.ghostLaunchVehicles != null)
+                    ld.ghostLaunchVehicles.AddRange(so.ghostLaunchVehicles);
+
+                if (so.ghostFlights != null)
+                    ld.ghostFlights.AddRange(so.ghostFlights);
+
+                if (so.routes != null)
+                {
+                    foreach (var sr in so.routes)
+                    {
+                        if (sr == null)
+                            continue;
+                        var route = new LogisticsRouteRecord
+                        {
+                            routeId = sr.routeId,
+                            sourceObjectId = sr.sourceObjectId > 0 ? sr.sourceObjectId : so.objectId,
+                            destinationObjectId = sr.destinationObjectId,
+                            isActive = sr.active,
+                            uiCollapsed = sr.collapsed,
+                            resources = new List<LogisticsRouteResourceRule>()
+                        };
+                        foreach (var savedRule in sr.resources ?? new List<SavedRouteResource>())
+                        {
+                            var rd = allResources?.GetByID(savedRule.resourceId);
+                            route.resources.Add(new LogisticsRouteResourceRule
+                            {
+                                resourceDef = (ResourceDefinitionIDSave)rd,
+                                ResourceDefinition = rd,
+                                sourceKeep = savedRule.sourceKeep,
+                                destinationTarget = savedRule.destinationTarget,
+                                isActive = savedRule.active,
+                                priority = savedRule.priority
+                            });
+                        }
+                        ld.routes.Add(route);
+                    }
+                }
             }
 
             LogisticsObserver.Log($"Loaded from {saveName}");

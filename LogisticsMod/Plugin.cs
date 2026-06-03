@@ -9,14 +9,12 @@ namespace LogisticsMod;
 [BepInPlugin("com.logisticsmod", "Logistics Tab", "0.3.0")]
 public class Plugin : BaseUnityPlugin
 {
+    private const string BuildLabel = "codex-2026-06-01-crew-supplies";
+    private const string BuildFeatures = "popup-editor,panel-bound-click-guard,escape-closes-logistics,route-ledger,route-destination-search,route-picker-minus-stack-step,balanced-route-resource-lift,route-balanced-craft-dispatch,route-resource-priority,route-pause-controls,route-health-summary,route-lv-cargo-lift,crew-safe-human-lift,crew-supply-reservation,crew-virtual-capsule-mass,ghost-estimated-flight-timing,ghost-upkeep-accounting,route-owned-cleanup,route-release-to-vanilla,route-launch-vehicle-assignment,route-owned-launch-vehicles,no-route-scopes,no-orphan-craft-launch-ui,route-resource-icon-summary,route-ship-count-summary,route-owned-spacecraft,route-resource-keep-target,route-first-dispatch,batched-ghost-dispatch,ghost-convoy-flights,virtual-orbit-drop,virtual-surface-lift,shared-facility-lift,ghost-spacecraft-ledger,reserved-launch-vehicles,batch-ghost-adoption,ghost-craft-release,ghost-flight-dispatch,ghost-flight-craft-label,ghost-fuel-reservation,ambient-ghost-traffic,ghost-trail-refresh";
+
     public static Plugin Instance { get; private set; }
-    public static ConfigEntry<bool> ReturnFuelEnabled { get; private set; }
-    public static ConfigEntry<double> ReturnFuelSafetyMultiplier { get; private set; }
-    public static ConfigEntry<bool> ReturnFuelReserveCargoFirst { get; private set; }
-    public static ConfigEntry<bool> ReturnFuelTrustDomesticOnlyAfterStockpile { get; private set; }
-    public static ConfigEntry<int> ReturnFuelMinimumDomesticReserveDays { get; private set; }
-    public static ConfigEntry<double> CyclePlanningGraceDays { get; private set; }
-    public static ConfigEntry<double> BlockedMissionRetryCooldownDays { get; private set; }
+    public static ConfigEntry<bool> VirtualSurfaceLiftEnabled { get; private set; }
+    public static ConfigEntry<double> VirtualSurfaceLiftPayloadsPerDay { get; private set; }
     public static ConfigEntry<bool> VerboseLogging { get; private set; }
     private static ConfigFile _pluginConfig;
 
@@ -25,24 +23,15 @@ public class Plugin : BaseUnityPlugin
         Instance = this;
         var pluginConfigPath = Path.Combine(Paths.PluginPath, "logisticsmod", "LogisticsMod.cfg");
         _pluginConfig = new ConfigFile(pluginConfigPath, saveOnInit: true);
-        ReturnFuelEnabled = _pluginConfig.Bind("ReturnFuel", "Enabled", true,
-            "When enabled, logistics missions try to stage enough fuel at the destination for the logistics vessel to return.");
-        ReturnFuelSafetyMultiplier = _pluginConfig.Bind("ReturnFuel", "SafetyMultiplier", 1.5,
-            "Multiplier applied to the estimated return fuel reserve.");
-        ReturnFuelReserveCargoFirst = _pluginConfig.Bind("ReturnFuel", "ReserveCargoFirst", true,
-            "When enabled, return-fuel reserve cargo is prioritized over the requested logistics cargo.");
-        ReturnFuelTrustDomesticOnlyAfterStockpile = _pluginConfig.Bind("ReturnFuel", "TrustDomesticOnlyAfterStockpile", true,
-            "When enabled, local/domestic fuel production is trusted only after the destination already has the estimated reserve stockpile.");
-        ReturnFuelMinimumDomesticReserveDays = _pluginConfig.Bind("ReturnFuel", "MinimumDomesticReserveDays", 0,
-            "Reserved for a later production-rate policy. The current first pass uses stockpile only.");
-        CyclePlanningGraceDays = _pluginConfig.Bind("Diagnostics", "CyclePlanningGraceDays", 3.0,
-            "In-game days a freshly created LOGI cycle is considered 'still being planned' before being treated as stale. The async code job system normally fires inside this window; raise if you see spurious CLEANUP warnings under heavy time acceleration.");
-        BlockedMissionRetryCooldownDays = _pluginConfig.Bind("Diagnostics", "BlockedMissionRetryCooldownDays", 30.0,
-            "In-game days to wait before retrying the same blocked or stale logistics dispatch attempt.");
+        VirtualSurfaceLiftEnabled = _pluginConfig.Bind("SurfaceLift", "Enabled", true,
+            "When enabled, same-body surface-to-orbit logistics use facility launch capacity as direct daily stock movement. Physical logistics missions are not created.");
+        VirtualSurfaceLiftPayloadsPerDay = _pluginConfig.Bind("SurfaceLift", "PayloadsPerFacilityPerDay", 1.0,
+            "How many full facility-backed launch payloads each enabled launch facility can move to its own orbit per in-game day.");
         VerboseLogging = _pluginConfig.Bind("Diagnostics", "VerboseLogging", false,
             "When enabled, per-request route and dispatch diagnostics are written to BepInEx/LogisticsMod_*.log.");
         _pluginConfig.Save();
         Harmony.CreateAndPatchAll(typeof(Plugin).Assembly, "com.logisticsmod");
-        LogisticsObserver.Log($"Plugin loaded! build=diagnostic-2026-05-11 source=Documents/SolarExpanseMods/LogisticsMod config={pluginConfigPath} returnFuel={ReturnFuelEnabled.Value} margin={ReturnFuelSafetyMultiplier.Value:0.##}");
+        Logger.LogInfo($"Build {BuildLabel} loaded; features={BuildFeatures}; surfaceLift={VirtualSurfaceLiftEnabled.Value}; payloadsPerFacilityPerDay={VirtualSurfaceLiftPayloadsPerDay.Value:0.##}");
+        LogisticsObserver.Log($"Plugin loaded! build={BuildLabel} source=LogisticsModTeddFork features={BuildFeatures} config={pluginConfigPath} surfaceLift={VirtualSurfaceLiftEnabled.Value} payloadsPerFacilityPerDay={VirtualSurfaceLiftPayloadsPerDay.Value:0.##}");
     }
 }

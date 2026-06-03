@@ -20,9 +20,19 @@ A [BepInEx](https://github.com/BepInEx/BepInEx) mod for **Solar Expanse** that a
 ## Installation
 
 1. Install BepInEx 5.x for Solar Expanse.
-2. Put `LogisticsMod.dll` in `BepInEx/plugins/logisticsmod/LogisticsMod.dll`.
+2. Download a release zip and extract it into the Solar Expanse install folder, or put `LogisticsMod.dll` in `BepInEx/plugins/logisticsmod/LogisticsMod.dll`.
 3. Launch the game.
 4. Open an object's info window. The logistics controls appear under the normal object sections.
+
+## Tester Builds
+
+Create a tester-ready zip with:
+
+```powershell
+.\Package-Release.ps1 -GameDir "I:\SteamLibrary\steamapps\common\Solar Expanse" -IncludeSymbols
+```
+
+The zip is written to `dist/` and contains the expected `BepInEx/plugins/logisticsmod/` folder structure. Upload that zip to a GitHub pre-release when asking someone else to test the mod.
 
 ## Building
 
@@ -35,13 +45,13 @@ LogisticsMod/LogisticsMod.csproj
 Build with:
 
 ```powershell
-dotnet build .\LogisticsMod\LogisticsMod.csproj
+dotnet build .\LogisticsMod\LogisticsMod.csproj -c Release -p:GameDir="I:\SteamLibrary\steamapps\common\Solar Expanse"
 ```
 
-The project is configured to deploy the main build output directly to:
+The project is configured to deploy the main build output directly to the configured game's BepInEx plugin folder:
 
 ```text
-C:\Program Files (x86)\Steam\steamapps\common\Solar Expanse\BepInEx\plugins\logisticsmod\LogisticsMod.dll
+BepInEx\plugins\logisticsmod\LogisticsMod.dll
 ```
 
 After each build, the DLL and PDB are also copied to the repository root:

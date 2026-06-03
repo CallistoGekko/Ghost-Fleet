@@ -30,5 +30,7 @@ internal static class TimeControllerPatches
             SaveLoadPatches.PendingPostLoadTrigger = false;
             Logic.LogisticsObserver.OnDayChange(0);
         }
+
+        Logic.LogisticsObserver.UpdateGhostFlightVisuals();
     }
 }
