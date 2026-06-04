@@ -11,7 +11,7 @@ namespace LogisticsMod;
 [BepInPlugin("com.logisticsmod", "Logistics Tab", "0.3.0")]
 public class Plugin : BaseUnityPlugin
 {
-    private const string BuildLabel = "codex-2026-06-01-crew-supplies";
+    private const string BuildLabel = "ghost-fleet-2026-06-01-crew-supplies";
     private const string BuildFeatures = "popup-editor,panel-bound-click-guard,escape-closes-logistics,route-ledger,route-destination-search,route-picker-minus-stack-step,balanced-route-resource-lift,route-balanced-craft-dispatch,route-resource-priority,route-pause-controls,route-health-summary,route-lv-cargo-lift,crew-safe-human-lift,crew-supply-reservation,crew-virtual-capsule-mass,ghost-estimated-flight-timing,ghost-upkeep-accounting,route-owned-cleanup,route-release-to-vanilla,route-launch-vehicle-assignment,route-owned-launch-vehicles,no-route-scopes,no-orphan-craft-launch-ui,route-resource-icon-summary,route-ship-count-summary,route-owned-spacecraft,route-resource-keep-target,route-first-dispatch,batched-ghost-dispatch,ghost-convoy-flights,virtual-orbit-drop,virtual-surface-lift,shared-facility-lift,ghost-spacecraft-ledger,reserved-launch-vehicles,batch-ghost-adoption,ghost-craft-release,ghost-flight-dispatch,ghost-flight-craft-label,ghost-fuel-reservation,ambient-ghost-traffic,ghost-trail-refresh";
 
     public static Plugin Instance { get; private set; }

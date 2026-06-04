@@ -15,7 +15,7 @@ if ([string]::IsNullOrWhiteSpace($version)) {
     $version = "0.0.0"
 }
 
-dotnet build $projectPath -c Release -p:GameDir="$GameDir"
+dotnet build $projectPath -c Release -t:Rebuild -p:GameDir="$GameDir" -p:DebugType=none -p:DebugSymbols=false
 
 $stageName = "GhostFleet-LogisticsMod-$version"
 $stageDir = Join-Path $distDir $stageName
@@ -29,6 +29,10 @@ New-Item -ItemType Directory -Force -Path $pluginDir | Out-Null
 Copy-Item -LiteralPath (Join-Path $GameDir "BepInEx\plugins\logisticsmod\LogisticsMod.dll") -Destination $pluginDir
 
 $pdbPath = Join-Path $GameDir "BepInEx\plugins\logisticsmod\LogisticsMod.pdb"
+if (-not $IncludeSymbols -and (Test-Path $pdbPath)) {
+    Remove-Item -LiteralPath $pdbPath -Force
+}
+
 if ($IncludeSymbols -and (Test-Path $pdbPath)) {
     Copy-Item -LiteralPath $pdbPath -Destination $pluginDir
 }

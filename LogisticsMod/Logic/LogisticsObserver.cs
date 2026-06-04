@@ -25,6 +25,7 @@ public static class LogisticsObserver
     private const double HumanLogisticsPayloadMass = 2.0;
     private const double CommittedStockWindowSeconds = 1.0;
     private const double RequestPlanThrottleDays = 3.0;
+    private static readonly bool GhostFlightVisualsEnabled = false;
     private static readonly Dictionary<string, RequestPlanThrottleState> _requestPlanThrottle = new Dictionary<string, RequestPlanThrottleState>();
     private static readonly Dictionary<string, VirtualLiftUsageState> _virtualLiftUsage = new Dictionary<string, VirtualLiftUsageState>();
     private static readonly Dictionary<string, TrajectoryObject> _ghostFlightVisuals = new Dictionary<string, TrajectoryObject>();
@@ -2211,6 +2212,9 @@ public static class LogisticsObserver
 
     private static void EnsureGhostFlightVisual(Data.GhostFlightRecord flight, Company player)
     {
+        if (!GhostFlightVisualsEnabled)
+            return;
+
         if (flight == null || string.IsNullOrEmpty(flight.flightId))
             return;
         if (_ghostFlightVisuals.TryGetValue(flight.flightId, out var existing))
@@ -2301,6 +2305,19 @@ public static class LogisticsObserver
         {
             LogWarning($"GHOST visual-refresh-failed: error={ex.GetType().Name}");
         }
+    }
+
+    public static void DisableGhostFlightVisuals()
+    {
+        if (_ghostFlightVisuals.Count == 0)
+            return;
+
+        foreach (var visual in _ghostFlightVisuals.Values.ToList())
+        {
+            if (visual != null)
+                UnityEngine.Object.Destroy(visual.gameObject);
+        }
+        _ghostFlightVisuals.Clear();
     }
 
     private static void UpdateGhostFlightVisual(Data.GhostFlightRecord flight, TrajectoryObject visual)

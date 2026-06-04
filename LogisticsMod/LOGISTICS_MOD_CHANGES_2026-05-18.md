@@ -2,6 +2,11 @@
 
 This note summarizes the recent source-code changes made during the logistics routing, return-fuel, quota, naming, cleanup, and diagnostics debugging pass.
 
+## 0.4.2 Alpha 2 Test Build
+
+- Guarded vanilla mission diagnostics at patch time so disabled diagnostics cannot spam the player log or collapse frame rate.
+- Disabled ghost-flight trajectory line visuals for this alpha because they were too costly in active saves; route traffic remains visible in the logistics table.
+
 ## Routing And Dispatch
 
 - Added crew supply reservation for ghost logistics flights: human shipments now consume trip supplies at dispatch and count each person as 2 tons plus supplies for capacity, fuel, and launch payload planning.

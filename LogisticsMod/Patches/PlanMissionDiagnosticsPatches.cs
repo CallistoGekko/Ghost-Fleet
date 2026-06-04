@@ -142,6 +142,11 @@ internal static class PlanMissionDiagnosticsPatches
             return AccessTools.Method(typeof(PMTabSchedule), "CreateFly");
         }
 
+        private static bool Prepare()
+        {
+            return VanillaDiagnosticsEnabled() && TargetMethod() != null;
+        }
+
         private static void Prefix(PMTabSchedule __instance)
         {
             LogSafe(() =>
@@ -158,6 +163,11 @@ internal static class PlanMissionDiagnosticsPatches
     [HarmonyPatch]
     private static class PMTabScheduleDirectCommitPatch
     {
+        private static bool Prepare()
+        {
+            return VanillaDiagnosticsEnabled();
+        }
+
         private static IEnumerable<MethodBase> TargetMethods()
         {
             var names = new HashSet<string>(StringComparer.Ordinal)
@@ -195,7 +205,7 @@ internal static class PlanMissionDiagnosticsPatches
 
         private static bool Prepare()
         {
-            return TargetMethod() != null;
+            return VanillaDiagnosticsEnabled() && TargetMethod() != null;
         }
 
         private static void Prefix(PMTabSchedule __instance, object[] __args)
@@ -215,6 +225,11 @@ internal static class PlanMissionDiagnosticsPatches
     [HarmonyPatch]
     private static class MissionInfoManagerCreateMissionInfoPatch
     {
+        private static bool Prepare()
+        {
+            return VanillaDiagnosticsEnabled();
+        }
+
         private static IEnumerable<MethodBase> TargetMethods()
         {
             var type = MissionInfoManagerType();
@@ -274,6 +289,11 @@ internal static class PlanMissionDiagnosticsPatches
     [HarmonyPatch]
     private static class MissionInfoManagerSaveLinkPatch
     {
+        private static bool Prepare()
+        {
+            return VanillaDiagnosticsEnabled();
+        }
+
         private static IEnumerable<MethodBase> TargetMethods()
         {
             var type = MissionInfoManagerType();

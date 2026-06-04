@@ -31,6 +31,6 @@ internal static class TimeControllerPatches
             Logic.LogisticsObserver.OnDayChange(0);
         }
 
-        Logic.LogisticsObserver.UpdateGhostFlightVisuals();
+        Logic.LogisticsObserver.DisableGhostFlightVisuals();
     }
 }
