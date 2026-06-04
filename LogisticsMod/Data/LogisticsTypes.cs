@@ -77,6 +77,12 @@ public enum GhostCraftStatus
     Retired
 }
 
+public enum LogisticsFlightPlanMode
+{
+    Fast = 1,
+    Optimal = 2
+}
+
 [Serializable]
 public class GhostLaunchVehicleRecord
 {
@@ -148,6 +154,13 @@ public class LogisticsRouteResourceRule
 }
 
 [Serializable]
+public class LogisticsRouteSpacecraftFlightPlan
+{
+    public string shipTypeId;
+    public LogisticsFlightPlanMode flightPlanMode = LogisticsFlightPlanMode.Optimal;
+}
+
+[Serializable]
 public class LogisticsRouteRecord
 {
     public int routeId;
@@ -157,6 +170,8 @@ public class LogisticsRouteRecord
     public bool uiCollapsed;
     public string statusNote;
     public List<LogisticsRouteResourceRule> resources = new List<LogisticsRouteResourceRule>();
+    public List<string> disabledFacilityLaunchCategories = new List<string>();
+    public List<LogisticsRouteSpacecraftFlightPlan> spacecraftFlightPlans = new List<LogisticsRouteSpacecraftFlightPlan>();
 }
 
 public enum GhostFlightStatus

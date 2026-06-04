@@ -239,6 +239,38 @@ public static class LogisticsNetwork
         return GetAllRoutes().FirstOrDefault(route => route.routeId == routeId);
     }
 
+    public static LogisticsFlightPlanMode GetRouteSpacecraftFlightPlanMode(LogisticsRouteRecord route, string shipTypeId)
+    {
+        if (route == null || string.IsNullOrWhiteSpace(shipTypeId))
+            return LogisticsFlightPlanMode.Optimal;
+
+        var record = route.spacecraftFlightPlans?.FirstOrDefault(plan =>
+            plan != null && string.Equals(plan.shipTypeId, shipTypeId, StringComparison.Ordinal));
+        return LogisticsFlightCalculator.NormalizeFlightPlanMode(
+            record?.flightPlanMode ?? LogisticsFlightPlanMode.Optimal);
+    }
+
+    public static void SetRouteSpacecraftFlightPlanMode(LogisticsRouteRecord route, string shipTypeId, LogisticsFlightPlanMode mode)
+    {
+        if (route == null || string.IsNullOrWhiteSpace(shipTypeId))
+            return;
+
+        var normalized = LogisticsFlightCalculator.NormalizeFlightPlanMode(mode);
+        route.spacecraftFlightPlans ??= new List<LogisticsRouteSpacecraftFlightPlan>();
+        route.spacecraftFlightPlans.RemoveAll(plan =>
+            plan == null || string.IsNullOrWhiteSpace(plan.shipTypeId)
+            || string.Equals(plan.shipTypeId, shipTypeId, StringComparison.Ordinal));
+
+        if (normalized != LogisticsFlightPlanMode.Optimal)
+        {
+            route.spacecraftFlightPlans.Add(new LogisticsRouteSpacecraftFlightPlan
+            {
+                shipTypeId = shipTypeId,
+                flightPlanMode = normalized
+            });
+        }
+    }
+
     public static LogisticsRouteResourceRule AddRouteResource(LogisticsRouteRecord route,
         ResourceDefinition rd, double sourceKeep, double destinationTarget)
     {

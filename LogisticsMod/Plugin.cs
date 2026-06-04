@@ -2,6 +2,8 @@ using BepInEx;
 using BepInEx.Configuration;
 using HarmonyLib;
 using LogisticsMod.Logic;
+using LogisticsMod.Patches;
+using System;
 using System.IO;
 
 namespace LogisticsMod;
@@ -16,6 +18,7 @@ public class Plugin : BaseUnityPlugin
     public static ConfigEntry<bool> VirtualSurfaceLiftEnabled { get; private set; }
     public static ConfigEntry<double> VirtualSurfaceLiftPayloadsPerDay { get; private set; }
     public static ConfigEntry<bool> VerboseLogging { get; private set; }
+    public static ConfigEntry<bool> VanillaMissionDiagnosticsEnabled { get; private set; }
     private static ConfigFile _pluginConfig;
 
     private void Awake()
@@ -29,9 +32,34 @@ public class Plugin : BaseUnityPlugin
             "How many full facility-backed launch payloads each enabled launch facility can move to its own orbit per in-game day.");
         VerboseLogging = _pluginConfig.Bind("Diagnostics", "VerboseLogging", false,
             "When enabled, per-request route and dispatch diagnostics are written to BepInEx/LogisticsMod_*.log.");
+        VanillaMissionDiagnosticsEnabled = _pluginConfig.Bind("Diagnostics", "VanillaMissionPlannerDiagnostics", false,
+            "Experimental: logs vanilla Plan Mission internals. Leave disabled unless actively comparing a single mission planner case.");
         _pluginConfig.Save();
-        Harmony.CreateAndPatchAll(typeof(Plugin).Assembly, "com.logisticsmod");
+        try
+        {
+            Harmony.CreateAndPatchAll(typeof(Plugin).Assembly, "com.logisticsmod");
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError($"Harmony patching failed: {ex}");
+            LogisticsObserver.LogError($"Plugin Harmony patching failed: {ex.GetType().Name}:{ex.Message}");
+            throw;
+        }
+
+        if (VanillaMissionDiagnosticsEnabled.Value)
+        {
+            try
+            {
+                PlanMissionDiagnosticsPatches.LogPatchStatus();
+            }
+            catch (Exception ex)
+            {
+                Logger.LogWarning($"Mission diagnostics patch status failed: {ex}");
+                LogisticsObserver.LogError($"Mission diagnostics patch status failed: {ex.GetType().Name}:{ex.Message}");
+            }
+        }
+
         Logger.LogInfo($"Build {BuildLabel} loaded; features={BuildFeatures}; surfaceLift={VirtualSurfaceLiftEnabled.Value}; payloadsPerFacilityPerDay={VirtualSurfaceLiftPayloadsPerDay.Value:0.##}");
-        LogisticsObserver.Log($"Plugin loaded! build={BuildLabel} source=LogisticsModTeddFork features={BuildFeatures} config={pluginConfigPath} surfaceLift={VirtualSurfaceLiftEnabled.Value} payloadsPerFacilityPerDay={VirtualSurfaceLiftPayloadsPerDay.Value:0.##}");
+        LogisticsObserver.Log($"Plugin loaded! build={BuildLabel} source=LogisticsModTeddFork features={BuildFeatures} config={pluginConfigPath} surfaceLift={VirtualSurfaceLiftEnabled.Value} payloadsPerFacilityPerDay={VirtualSurfaceLiftPayloadsPerDay.Value:0.##} vanillaMissionDiagnostics={VanillaMissionDiagnosticsEnabled.Value}");
     }
 }

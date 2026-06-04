@@ -65,6 +65,15 @@ public static class LogisticsPersistence
         public bool active;
         public bool collapsed;
         public List<SavedRouteResource> resources = new List<SavedRouteResource>();
+        public List<string> disabledFacilityLaunchCategories = new List<string>();
+        public List<SavedRouteSpacecraftFlightPlan> spacecraftFlightPlans = new List<SavedRouteSpacecraftFlightPlan>();
+    }
+
+    [Serializable]
+    private class SavedRouteSpacecraftFlightPlan
+    {
+        public string shipTypeId;
+        public int flightPlanMode;
     }
 
     [Serializable]
@@ -146,8 +155,24 @@ public static class LogisticsPersistence
                         sourceObjectId = route.sourceObjectId,
                         destinationObjectId = route.destinationObjectId,
                         active = route.isActive,
-                        collapsed = route.uiCollapsed
+                        collapsed = route.uiCollapsed,
+                        disabledFacilityLaunchCategories = (route.disabledFacilityLaunchCategories ?? new List<string>())
+                            .Where(category => !string.IsNullOrWhiteSpace(category))
+                            .Select(category => category.Trim())
+                            .Distinct(StringComparer.OrdinalIgnoreCase)
+                            .ToList()
                     };
+                    foreach (var plan in route.spacecraftFlightPlans ?? new List<LogisticsRouteSpacecraftFlightPlan>())
+                    {
+                        if (plan == null || string.IsNullOrWhiteSpace(plan.shipTypeId))
+                            continue;
+                        var mode = LogisticsFlightCalculator.NormalizeFlightPlanMode(plan.flightPlanMode);
+                        savedRoute.spacecraftFlightPlans.Add(new SavedRouteSpacecraftFlightPlan
+                        {
+                            shipTypeId = plan.shipTypeId,
+                            flightPlanMode = (int)mode
+                        });
+                    }
                     foreach (var rule in route.resources ?? new List<LogisticsRouteResourceRule>())
                     {
                         if (rule == null)
@@ -256,6 +281,20 @@ public static class LogisticsPersistence
                             destinationObjectId = sr.destinationObjectId,
                             isActive = sr.active,
                             uiCollapsed = sr.collapsed,
+                            disabledFacilityLaunchCategories = (sr.disabledFacilityLaunchCategories ?? new List<string>())
+                                .Where(category => !string.IsNullOrWhiteSpace(category))
+                                .Select(category => category.Trim())
+                                .Distinct(StringComparer.OrdinalIgnoreCase)
+                                .ToList(),
+                            spacecraftFlightPlans = (sr.spacecraftFlightPlans ?? new List<SavedRouteSpacecraftFlightPlan>())
+                                .Where(plan => plan != null && !string.IsNullOrWhiteSpace(plan.shipTypeId))
+                                .Select(plan => new LogisticsRouteSpacecraftFlightPlan
+                                {
+                                    shipTypeId = plan.shipTypeId,
+                                    flightPlanMode = LogisticsFlightCalculator.NormalizeFlightPlanMode(
+                                        (LogisticsFlightPlanMode)plan.flightPlanMode)
+                                })
+                                .ToList(),
                             resources = new List<LogisticsRouteResourceRule>()
                         };
                         foreach (var savedRule in sr.resources ?? new List<SavedRouteResource>())
@@ -283,4 +322,5 @@ public static class LogisticsPersistence
             LogisticsObserver.LogError($"Load error: {ex}");
         }
     }
+
 }

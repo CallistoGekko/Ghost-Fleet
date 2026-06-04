@@ -17,6 +17,12 @@ BepInEx\plugins\logisticsmod\LogisticsMod.dll
 
 ## Smoke Test
 
+- Run the vanilla mission formula regression harness:
+
+```powershell
+dotnet run --project .\LogisticsMod.FormulaTests\LogisticsMod.FormulaTests.csproj -c Release
+```
+
 - Open an owned object's info window.
 - Click the Logistics button.
 - Confirm the popup title matches the selected body or orbit.
@@ -135,13 +141,14 @@ BepInEx\LogOutput.log
 BepInEx\LogisticsMod_*.log
 ```
 
-To enable the extra logistics log, set:
+Extra logistics diagnostics are off by default. For a targeted bug capture, temporarily flip only the needed value to `true`, reproduce once, then return it to:
 
 ```text
 BepInEx\plugins\logisticsmod\LogisticsMod.cfg
 
 [Diagnostics]
-VerboseLogging = true
+VerboseLogging = false
+VanillaMissionPlannerDiagnostics = false
 ```
 
 ## Bug Report Template

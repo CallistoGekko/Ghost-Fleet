@@ -14,9 +14,41 @@ This note summarizes the recent source-code changes made during the logistics ro
 - Kept relay legs internal to the planner so the player-facing UI still shows a single request.
 - Added source ranking rules that prefer local orbital sources before more expensive surface or remote sources.
 - Added support for launch-support scoring so magnetic rails, space elevators, spin launchers, and similar low-cost launch infrastructure can influence source choice.
+- Added route-level facility launch category toggles so routes can opt out of shared space elevator, spin launch, magnetic rail/mass driver, or generic facility launch support while keeping assigned launch vehicles separate.
+- Styled route facility launch toggles as square icon tiles using the source launch-support sprite, with hover tooltips.
+- Refined route facility launch tiles into a wrapped themed section with the label on its own line, nominal-green active tint, muted disabled opacity, no corner pip, clipped sprites, and a compact icon scale.
+- Facility launch sections now always show every supported facility category, rendering missing source categories as 20% opaque placeholders instead of hiding them.
+- Facility launch sections are hidden for orbit route sources because orbit routes have no surface facility launch policy.
+- Removed the disabled-tile X overlay and added representative launch sprite lookup for missing facility launch categories.
+- Tightened the facility launch tile row sizing so the section stays compact and wide facility sprites remain clipped inside their square tile.
 - Added route-level planning locks so only one async stock planning job is submitted for a specific source -> target -> resource route at a time.
 - Route locks are released after the stock planning callback completes, allowing the next load to begin planning immediately after the mission is created rather than waiting for arrival.
 - Added cleanup for route locks when runtime state is reset between saves.
+- Corrected deep-space ghost flight fuel estimates so cached vanilla optimal transfers can drive delta-v and interplanetary routes are no longer capped to a small tank fraction.
+- Matched route ghost flight propellant estimates to vanilla cached optimal transfers by checking low-orbit endpoint variants, normalizing suspicious fractional deep-space delta-v values, and preventing same-parent/parent-child routes from using the short-hop tank-fraction cap.
+- Tuned the heliocentric same-parent fallback to match the vanilla fastest impulse scale for Venus-to-Earth Zeus routes and allowed active ghost-flight rows to correct clearly mismatched stored fuel both upward and downward.
+- Rebalanced the heliocentric fallback against the Mars-to-Earth Nike case, rejected stale slow cached transfers for fast logistics routes, trusted current high-delta-v vanilla transfers, and allowed active ghost-flight rows to repair clearly wrong arrival dates as well as fuel.
+- Added a vanilla mission formula regression harness covering grouped spacecraft fuel rounding and fastest versus optimal porkchop selection rules.
+- Reworked route facility launch controls into labeled options with distinct enabled, disabled, and missing states, and kept empty route spacecraft/launch vehicle sections aligned without misleading headers or zero counts.
+- Changed route facility launch option states so disabled categories render red, while enabled categories missing at the current source stay clickable and render amber for preconfiguration.
+- Stretched route facility launch option rows to equal section padding and restored representative icons for missing categories so all category icons remain visible.
+- Expanded route facility launch options to the six vanilla launch facility types in a 3x2 grid.
+- Preserved the active route editor across passive popup refreshes so advancing time no longer returns the popup to the route list.
+- Refreshed the open route editor in place as game time advances so ready counts, route status, and route traffic update without leaving the route page.
+- Rendered route facility launch icons from vanilla facility images when available, greyed enabled-missing facilities, and reserved warning amber for `Missing Disabled`.
+- Darkened the sticky route subheader, removed decorative facility launch grid rules, and restyled empty asset rows as normal table rows.
+- Fixed missing facility launch icon selection to classify all vanilla launch facility descriptors by real descriptor names/ids instead of `GetText(false)` sprite markup.
+- Adjusted the sticky route subheader to a middle theme shade so it stays distinct from both the title header and panel body.
+- Routed Space Elevator icons through the launch-support sprite path instead of its placeholder-prone facility descriptor image.
+- Detected built Space Elevators from finished/enabled source facilities and exposed them to route launch support even when vanilla does not create a fake launch vehicle row.
+- Detected all finished/enabled launch facility categories directly from source facilities so Launch Pad and similar buildings are available even when vanilla does not surface a fake launch vehicle row.
+- Kept directly detected launch facility tiles on category representative art so Launch Pad availability does not pick up unrelated built-facility descriptor sprites.
+- Added larger Keep/Target amount steps up to 1B in paired positive/negative rows in the logistics amount editors.
+- Rendered empty route resource, spacecraft, and launch vehicle sections as matching table-color rows with lightly padded left-aligned primary text.
+- Removed the facility launch grid section background so the launch facility tiles float on the route editor background.
+- Removed the remaining horizontal padding from the floating facility launch grid so its tile edges align with the route editor rows.
+- Switched logistics amount labels to compact mass postfix text such as `KT`, `MT`, and `BT` while preserving button theme colors.
+- Fixed route resource priority controls so they refresh as a radio-button group with only the selected priority using the active state.
 
 ## Quotas And Vehicle Availability
 
@@ -54,6 +86,9 @@ This note summarizes the recent source-code changes made during the logistics ro
 - Added support for inbound in-transit status to include vehicle and arrival information where available.
 - Matched more of the logistics UI text and section styling to the stock object-info UI.
 - Reverted problematic button color/flash changes while preserving improved text styling work.
+- Added small hover tooltips for the popup title body's quick-swap icon buttons.
+- Skipped asteroid/comet bodies and their orbits in the popup title quick-swap menu while preserving moon targets.
+- Tightened the route destination picker to hide destroyed, hidden, proxy, helper-orbit, duplicate-id, and dead/pushed asteroid/comet targets while keeping live asteroid/comet bodies.
 
 ## Mission Naming And Icons
 
@@ -89,10 +124,10 @@ This note summarizes the recent source-code changes made during the logistics ro
 ## Build And Deployment
 
 - The mod has been rebuilt repeatedly with:
-  - `dotnet build C:\Users\parft\Documents\SolarExpanseMods\LogisticsMod\LogisticsMod.csproj -c Release`
+  - `dotnet build .\LogisticsMod\LogisticsMod.csproj -c Release -p:GameDir="<Solar Expanse install>"`
 - The built DLL is deployed to:
-  - `C:\Program Files (x86)\Steam\steamapps\common\Solar Expanse\BepInEx\plugins\logisticsmod\LogisticsMod.dll`
-  - `C:\Users\parft\Documents\SolarExpanseMods\LogisticsModGit\LogisticsModTeddFork\LogisticsMod.dll`
+  - `<Solar Expanse install>\BepInEx\plugins\logisticsmod\LogisticsMod.dll`
+  - `.\LogisticsMod.dll` for local manual testing
 
 ## Current Debug Focus
 
@@ -138,6 +173,25 @@ This note summarizes the recent source-code changes made during the logistics ro
 - Moved route editor Back and Pause/Resume into a single top inline action row so the route manifest content starts cleaner.
 - Added collapsed-route resource icon summaries and persisted each route's open/closed overview state with the logistics save data.
 - Realigned spacecraft/launch vehicle `Asset` table headers with the asset name text instead of the icon gutter.
+- Reduced popup scroll overhead by making decorative labels/row backgrounds non-raycast and letting the smooth-scroll helper sleep while idle.
+- Restored compact bordered route editor action buttons and grouped the route lane, health status, and resource quick-click icons into a summary panel.
+- Added fixed-height virtualized row pooling for route resource and route traffic tables, and restored stronger smooth wheel scrolling now that dense lists render fewer live rows.
+- Normalized all-caps spacecraft and launch vehicle display names so assets such as `EAGLE` render as `Eagle`.
+- Changed route convoy planning so resources waiting for a full load no longer reserve convoy capacity from other shippable resources, shortened route status text, and hardened orbit/body matching for direct drop routes.
+- Added icon-only title-bar body switch buttons for nearby parent/child bodies and their orbits so the open Logistics popup can swap focus without closing.
+- Added a compact fuel-used column to route traffic rows so each flight shows the fuel burned for its active leg separately from shipped cargo.
+- Replaced route traffic fuel cache lookups with immediate transfer-grid calculation and added per-route spacecraft-type Fast/Optimal defaults, with Optimal as the fallback and solar-sail craft forced to Optimal.
+- Added inline Fast/Optimal controls to assigned spacecraft rows and a single type-level `Default plan` row in the count editor so visible ship stacks switch together instead of per craft.
+- Fixed active route traffic fuel refresh so it falls back to the flight cargo manifest when older/in-flight craft records do not carry their cargo amount, preventing fast flights from being recomputed as nearly empty.
+- Prevented launched route traffic fuel, arrival, and duration from changing during later plan changes or convoy normalization; only future planned flights may be refreshed.
+- Matched route Fast/Optimal porkchop gating to vanilla spacecraft type effective delta-v instead of rebuilding it from tank capacity and cargo mass.
+- Limited the Sun/Solar Orbit title-bar switcher to vanilla-style primary solar-system clusters and sorted switcher bodies by orbital distance from their parent.
+- Moved route editor Back and Pause/Resume controls into a sticky popup subheader outside the scroll area, with the compact route lane centered between them.
+- Suppressed child orbit duplicates in crowded body switcher families while keeping the current body's own orbit visible.
+- Enriched the sticky route subheader with body icons and removed the duplicate route header from the scroll area.
+- Removed the redundant route editor status/resource summary block so route planners open directly into the editable resource table.
+- Added the route status dot to the sticky route subheader, moved Back beside Pause/Resume on the right, and gave Pause an amber warning treatment.
+- Blocked human cargo from shared non-elevator facility lift while allowing space elevators and assigned/reserved launch vehicles.
 - Some Nike missions are still attempting incorrect cargo payloads.
 - Current diagnostics are intended to show the full path from planner manifest to stock launch attempt:
   - intended cargo and fuel manifest,

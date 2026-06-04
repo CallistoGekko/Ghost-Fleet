@@ -179,7 +179,9 @@ public class LogisticsSection
         _contentGo.transform.SetParent(Root.transform, false);
         ContentArea = _contentGo.GetComponent<RectTransform>();
 
-        _contentGo.GetComponent<Image>().color = _contentBgColor;
+        var contentImage = _contentGo.GetComponent<Image>();
+        contentImage.color = _contentBgColor;
+        contentImage.raycastTarget = false;
 
         var cVlg = _contentGo.GetComponent<VerticalLayoutGroup>();
         cVlg.childForceExpandWidth = true;
@@ -200,6 +202,7 @@ public class LogisticsSection
         phTmp.font = font;
         phTmp.fontSize = 13;
         phTmp.color = new Color(0.5f, 0.5f, 0.5f, 1f);
+        phTmp.raycastTarget = false;
 
         SetExpanded(false);
 
@@ -270,6 +273,7 @@ public class LogisticsSection
         tmp.font = font;
         tmp.fontSize = fontSize;
         tmp.color = color ?? new Color(0.7f, 0.7f, 0.7f, 1f);
+        tmp.raycastTarget = false;
         return tmp;
     }
 

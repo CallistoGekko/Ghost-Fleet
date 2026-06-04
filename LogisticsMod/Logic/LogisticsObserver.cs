@@ -33,6 +33,7 @@ public static class LogisticsObserver
     {
         public double Fuel;
         public double TravelDays;
+        public double DeltaV;
         public DateTime Departure;
         public DateTime Arrival;
         public ResourceDefinition FuelType;
@@ -201,6 +202,11 @@ public static class LogisticsObserver
             Log(msg);
     }
 
+    public static void LogAlways(string msg)
+    {
+        WriteLog("", msg);
+    }
+
     public static void LogWarning(string msg)
     {
         if (!VerboseLogging)
@@ -278,6 +284,7 @@ public static class LogisticsObserver
         if (player == null) return;
         var snapshot = BuildPlannerSnapshot(player);
         Data.LogisticsNetwork.ReleaseOrphanedRouteAssets();
+        RecoverBlockedReturnFuelCraft(player);
         ProcessGhostFlights(player, snapshot);
         ProcessRoutes(player, snapshot);
     }
@@ -326,23 +333,6 @@ public static class LogisticsObserver
 
                 ProcessRouteResource(route, rule, source, destination, rd, player, snapshot,
                     allowVirtualSurfaceLift: !useBalancedRouteLift);
-            }
-
-            orderedResources = BuildRouteResourceDispatchOrder(route, source, destination, player);
-            var dispatchableResources = orderedResources.Where(item => item.HasDispatchableDemand).ToList();
-            var idleRouteCraftCount = dispatchableResources.Count > 1
-                ? FindIdleRouteGhostCraftCandidates(route, source, destination, player, out _).Count
-                : 0;
-            if (dispatchableResources.Count > 1 && idleRouteCraftCount > 0)
-            {
-                var totalWeight = dispatchableResources.Sum(item => GetRoutePriorityDispatchWeight(item.Priority));
-                foreach (var item in dispatchableResources)
-                {
-                    var share = totalWeight <= 0
-                        ? (double)idleRouteCraftCount / dispatchableResources.Count
-                        : idleRouteCraftCount * GetRoutePriorityDispatchWeight(item.Priority) / totalWeight;
-                    item.MaxGhostDispatches = Math.Max(1, (int)Math.Ceiling(share));
-                }
             }
 
             var convoyReason = TryCreateRouteGhostConvoys(route, source, destination, orderedResources, player, snapshot);
@@ -434,7 +424,7 @@ public static class LogisticsObserver
         var available = GetRouteSourceAvailableAfterKeep(source, rd, rule.sourceKeep, player);
         if (available <= 0.001)
         {
-            rule.statusNote = $"Waiting for source surplus above {rule.sourceKeep:0.#}";
+            rule.statusNote = "Waiting for surplus";
             return;
         }
 
@@ -652,6 +642,12 @@ public static class LogisticsObserver
             return craftReason;
         }
 
+        FilterRouteStatesForFullLoads(states, craftCandidates, source, destination, player);
+        if (states.Count == 0)
+            return "Waiting for full load";
+
+        AllocateRouteDispatchCapacity(states, craftCandidates.Count);
+
         var plans = new List<GhostDeliveryPlan>();
         var plannedCargoByResource = new Dictionary<string, double>();
         string bestReason = null;
@@ -727,6 +723,92 @@ public static class LogisticsObserver
         return null;
     }
 
+    private static void FilterRouteStatesForFullLoads(List<RouteConvoyResourceState> states,
+        List<Data.GhostCraftRecord> craftCandidates, ObjectInfo source, ObjectInfo destination, Company player)
+    {
+        if (states == null || states.Count == 0)
+            return;
+
+        for (var i = states.Count - 1; i >= 0; i--)
+        {
+            var state = states[i];
+            if (state?.Item?.Rule == null || state.Item.Resource == null)
+            {
+                states.RemoveAt(i);
+                continue;
+            }
+
+            if (!TryGetMinimumRouteFullLoadAmount(state.Item.Resource, craftCandidates, source, destination, player,
+                    out var minimumFullLoad))
+                continue;
+
+            var desired = Math.Min(state.Remaining, state.Item.Available);
+            if (desired + 0.001 >= minimumFullLoad)
+                continue;
+
+            state.Item.Rule.statusNote = "Waiting for full load";
+            states.RemoveAt(i);
+        }
+    }
+
+    private static bool TryGetMinimumRouteFullLoadAmount(ResourceDefinition rd, List<Data.GhostCraftRecord> craftCandidates,
+        ObjectInfo source, ObjectInfo destination, Company player, out double minimumFullLoad)
+    {
+        minimumFullLoad = double.MaxValue;
+        if (rd == null || craftCandidates == null || craftCandidates.Count == 0)
+            return false;
+
+        var travelDays = EstimateGhostTravelDays(source, destination);
+        var supplyResource = IsHumanResource(rd) ? ResolveSupplyResource() : null;
+        var supplyPerHuman = IsHumanResource(rd) && supplyResource != null
+            ? EstimateCrewSupplyNeed(1, travelDays, player)
+            : 0;
+        var payloadMassPerUnit = GetPayloadMassPerResourceUnit(rd, supplyPerHuman);
+        if (payloadMassPerUnit <= 0.001)
+            return false;
+
+        foreach (var craft in craftCandidates)
+        {
+            var scType = ResolveSpacecraftType(craft?.shipTypeId);
+            if (scType == null)
+                continue;
+
+            var capacity = scType.GetCargoCapacity(player);
+            if (capacity <= 0.001)
+                continue;
+
+            var fullLoad = capacity / payloadMassPerUnit;
+            if (IsHumanResource(rd))
+                fullLoad = Math.Floor(fullLoad);
+            if (fullLoad > 0.001)
+                minimumFullLoad = Math.Min(minimumFullLoad, fullLoad);
+        }
+
+        return minimumFullLoad < double.MaxValue;
+    }
+
+    private static void AllocateRouteDispatchCapacity(List<RouteConvoyResourceState> states, int idleCraftCount)
+    {
+        if (states == null || states.Count == 0)
+            return;
+
+        foreach (var state in states)
+            if (state?.Item != null)
+                state.Item.MaxGhostDispatches = int.MaxValue;
+
+        if (states.Count <= 1 || idleCraftCount <= 0)
+            return;
+
+        var totalWeight = states.Sum(state => GetRoutePriorityDispatchWeight(state.Item.Priority));
+        foreach (var state in states)
+        {
+            var share = totalWeight <= 0
+                ? (double)idleCraftCount / states.Count
+                : idleCraftCount * GetRoutePriorityDispatchWeight(state.Item.Priority) / totalWeight;
+            state.Item.MaxGhostDispatches = Math.Max(1, (int)Math.Ceiling(share));
+        }
+    }
+
     private static bool TryCommitGhostDeliveryConvoys(List<GhostDeliveryPlan> plans, Company player, out string reason)
     {
         reason = null;
@@ -781,6 +863,9 @@ public static class LogisticsObserver
             reason = "Convoy plan is incomplete";
             return false;
         }
+
+        if (!NormalizeConvoyPlanFuelToVanillaGroup(plans, player, out reason))
+            return false;
 
         var removals = plans.SelectMany(BuildGhostDeliveryPlanRemovals).ToList();
         if (!TryApplyResourceRemovals(removals, out reason))
@@ -856,6 +941,126 @@ public static class LogisticsObserver
         var returnSource = first.DestinationRefuel ? $"reserved at {first.Requester.ObjectName}" : "tank round trip";
         Log($"GHOST convoy-dispatch: ships={plans.Count} {first.Provider.ObjectName}->{first.Requester.ObjectName} manifest={FormatGhostFlightManifestForLog(flight)} fuelOut={flight.outboundFuel:0.#} fuelBack={flight.returnFuel:0.#} returnFuel={returnSource} launchPayload={flight.launchPayloadMass:0.#} arrive={flight.arrivalDate:yyyy-MM-dd}");
         return true;
+    }
+
+    private static bool NormalizeConvoyPlanFuelToVanillaGroup(List<GhostDeliveryPlan> plans, Company player,
+        out string reason)
+    {
+        reason = null;
+        plans = plans?.Where(plan => plan != null).ToList();
+        if (plans == null || plans.Count == 0)
+        {
+            reason = "Convoy plan is unavailable";
+            return false;
+        }
+
+        var first = plans[0];
+        var scType = first.SpacecraftType ?? ResolveSpacecraftType(first.Craft?.shipTypeId);
+        if (scType == null || player == null || scType.SolarSC)
+            return true;
+
+        var craftCount = plans
+            .Select(plan => plan.Craft?.ledgerId ?? 0)
+            .Where(id => id > 0)
+            .Distinct()
+            .Count();
+        if (craftCount <= 0)
+            craftCount = plans.Count;
+
+        var outboundDeltaV = plans
+            .Select(plan => Math.Max(0.0, plan.Outbound?.DeltaV ?? 0.0))
+            .DefaultIfEmpty(0.0)
+            .Max();
+        var returnDeltaV = plans
+            .Select(plan => Math.Max(0.0, plan.ReturnLeg?.DeltaV ?? 0.0))
+            .DefaultIfEmpty(0.0)
+            .Max();
+        if (outboundDeltaV <= 0.001 && returnDeltaV <= 0.001)
+            return true;
+
+        var dryMass = Math.Max(1.0, scType.GetMass(player));
+        var exhaustVelocity = Math.Max(0.001, scType.GetExhaustV(player));
+        var powVariable = GetMissionFuelPowVariable();
+        var outboundMass = LogisticsVanillaMissionMath.CalculateMassToFuel(
+            dryMass,
+            plans.Sum(plan => Math.Max(0.0, plan.PayloadCargoMass)),
+            craftCount);
+        var returnMass = LogisticsVanillaMissionMath.CalculateMassToFuel(dryMass, 0.0, craftCount);
+        var groupedOutboundFuel = LogisticsVanillaMissionMath.CalculateTotalPropellantNeeded(
+            outboundMass,
+            outboundDeltaV,
+            exhaustVelocity,
+            powVariable);
+        var groupedReturnFuel = LogisticsVanillaMissionMath.CalculateTotalPropellantNeeded(
+            returnMass,
+            returnDeltaV,
+            exhaustVelocity,
+            powVariable);
+        LogVerbose($"ROUTE-MISSION step=fuel-grouped route={first.RouteId} ships={craftCount} ship={scType.ID} dry={dryMass:0.###} cargo={plans.Sum(plan => Math.Max(0.0, plan.PayloadCargoMass)):0.###} outboundMass={outboundMass:0.###} returnMass={returnMass:0.###} dVOut={outboundDeltaV:0.###} dVBack={returnDeltaV:0.###} exhaust={exhaustVelocity:0.###} pow={powVariable:0.###} fuelOut={groupedOutboundFuel:0.###} fuelBack={groupedReturnFuel:0.###}");
+
+        DistributeGroupedLegFuel(plans, plan => plan.Outbound, groupedOutboundFuel);
+        DistributeGroupedLegFuel(plans, plan => plan.ReturnLeg, groupedReturnFuel);
+
+        var fuelType = first.FuelType ?? scType.GetFuelType();
+        var destinationData = first.DestinationData ?? first.Requester?.GetObjectInfoData(player);
+        var destinationRefuel = fuelType != null
+            && groupedReturnFuel > 0.001
+            && destinationData != null
+            && destinationData.CheckResources(fuelType) + 0.001 >= groupedReturnFuel;
+
+        foreach (var plan in plans)
+        {
+            plan.FuelType = fuelType;
+            plan.DestinationRefuel = destinationRefuel;
+            plan.ReservedReturnFuel = destinationRefuel ? Math.Max(0.0, plan.ReturnLeg?.Fuel ?? 0.0) : 0.0;
+
+            var requiredTankAtDeparture = destinationRefuel
+                ? Math.Max(0.0, plan.Outbound?.Fuel ?? 0.0)
+                : Math.Max(0.0, plan.Outbound?.Fuel ?? 0.0) + Math.Max(0.0, plan.ReturnLeg?.Fuel ?? 0.0);
+            if (requiredTankAtDeparture > plan.Craft.tankFuelCapacity + 0.001)
+            {
+                reason = $"Ghost craft tank too small for {plan.Provider.ObjectName}->{plan.Requester.ObjectName}->{plan.Provider.ObjectName}";
+                return false;
+            }
+
+            plan.OriginFuelTopUp = Math.Max(0.0, requiredTankAtDeparture - plan.Craft.tankFuel);
+        }
+
+        if (plans.Count > 1)
+            LogVerbose($"GHOST convoy-fuel-grouped: ships={craftCount} dry={dryMass:0.###} cargo={plans.Sum(plan => Math.Max(0.0, plan.PayloadCargoMass)):0.#} massOut={outboundMass:0.###} exhaust={exhaustVelocity:0.###} pow={powVariable:0.###} fuelOut={groupedOutboundFuel:0.#} fuelBack={groupedReturnFuel:0.#} dVOut={outboundDeltaV:0.##} dVBack={returnDeltaV:0.##}");
+        return true;
+    }
+
+    private static void DistributeGroupedLegFuel(List<GhostDeliveryPlan> plans, Func<GhostDeliveryPlan, GhostLegPlan> legSelector,
+        double groupedFuel)
+    {
+        if (plans == null || plans.Count == 0 || legSelector == null)
+            return;
+
+        groupedFuel = Math.Max(0.0, groupedFuel);
+        var currentTotal = plans.Sum(plan => Math.Max(0.0, legSelector(plan)?.Fuel ?? 0.0));
+        var remaining = groupedFuel;
+        for (var i = 0; i < plans.Count; i++)
+        {
+            var leg = legSelector(plans[i]);
+            if (leg == null)
+                continue;
+
+            var share = i == plans.Count - 1
+                ? remaining
+                : (currentTotal > 0.001
+                    ? groupedFuel * Math.Max(0.0, leg.Fuel) / currentTotal
+                    : groupedFuel / plans.Count);
+            share = Math.Max(0.0, share);
+            leg.Fuel = share;
+            remaining -= share;
+        }
+    }
+
+    private static double GetMissionFuelPowVariable()
+    {
+        var economic = MonoBehaviourSingleton<GameManager>.Instance?.Economic;
+        return Math.Max(0.001, economic?.PowVariable ?? 2.0);
     }
 
     private static List<ResourceRemoval> BuildGhostDeliveryPlanRemovals(GhostDeliveryPlan plan)
@@ -1067,18 +1272,10 @@ public static class LogisticsObserver
             return;
 
         var primaryCraft = craftList[0];
-        var scType = ResolveSpacecraftType(primaryCraft.shipTypeId);
         var craftCount = Math.Max(1, craftList.Count);
         var returnFuel = Math.Max(0, outbound.returnFuel) / craftCount;
         var returnDeparture = now;
         var returnArrival = now.AddDays(Math.Max(1, outbound.returnTravelDays));
-        GhostLegPlan returnLegNow = null;
-        if (scType != null && TryCalculateGhostLeg(primaryCraft, scType, current, home, null, 0, player, out returnLegNow))
-        {
-            returnFuel = Math.Max(0, returnLegNow.Fuel);
-            returnDeparture = GetGhostLegDeparture(returnLegNow, now);
-            returnArrival = GetGhostLegArrival(returnLegNow, returnDeparture);
-        }
         var reservedReturnFuelPerCraft = Math.Max(0, outbound.reservedReturnFuel) / craftCount;
         if (outbound.destinationRefuel)
         {
@@ -1455,20 +1652,22 @@ public static class LogisticsObserver
 
         if (routeId >= 0 && !IsFullRouteGhostLoad(amount, capacity, payloadMassPerUnit, isHumanPayload, out var fullLoadAmount))
         {
-            reason = $"Waiting for full load ({amount:0.#}/{fullLoadAmount:0.#})";
+            reason = "Waiting for full load";
             return false;
         }
 
         var supplyConsumed = isHumanPayload ? EstimateCrewSupplyNeed(amount, outboundTravelDays, player) : 0;
         var payloadCargoMass = GetPayloadCargoMass(rd, amount, supplyConsumed);
 
-        if (!TryCalculateGhostLeg(craft, scType, provider, requester, rd, payloadCargoMass, player, out var outbound))
+        if (!TryCalculateGhostLeg(craft, scType, provider, requester, rd, payloadCargoMass, player, routeId,
+                out var outbound))
         {
             reason = outbound?.Reason ?? "Could not calculate outbound fuel";
             return false;
         }
 
-        if (!TryCalculateGhostLeg(craft, scType, requester, provider, null, 0, player, out var returnLeg))
+        if (!TryCalculateGhostLeg(craft, scType, requester, provider, null, 0, player, routeId,
+                out var returnLeg))
         {
             reason = returnLeg?.Reason ?? "Could not calculate return fuel";
             return false;
@@ -1566,6 +1765,13 @@ public static class LogisticsObserver
     private static bool TryCalculateGhostLeg(Data.GhostCraftRecord craft, SpacecraftType scType, ObjectInfo from,
         ObjectInfo to, ResourceDefinition cargoResource, double cargoAmount, Company player, out GhostLegPlan plan)
     {
+        return TryCalculateGhostLeg(craft, scType, from, to, cargoResource, cargoAmount, player, -1, out plan);
+    }
+
+    private static bool TryCalculateGhostLeg(Data.GhostCraftRecord craft, SpacecraftType scType, ObjectInfo from,
+        ObjectInfo to, ResourceDefinition cargoResource, double cargoAmount, Company player, int routeId,
+        out GhostLegPlan plan)
+    {
         plan = new GhostLegPlan();
         if (craft == null || scType == null || from == null || to == null || player == null)
         {
@@ -1581,7 +1787,10 @@ public static class LogisticsObserver
             Resource = cargoResource,
             Amount = cargoAmount
         };
-        var flight = LogisticsFlightCalculator.CalculateSoonestOptimalFlight(from, to, vehicle, cargo, player);
+        var requestedFlightPlanMode = ResolveGhostCraftRequestedFlightPlanMode(craft, routeId);
+        LogVerbose($"ROUTE-MISSION step=leg-input route={routeId} from={from.ObjectName}#{from.id}({from.objectTypes}) to={to.ObjectName}#{to.id}({to.objectTypes}) craftLedger={craft.ledgerId} ship={scType.ID} requestedMode={requestedFlightPlanMode} cargoResource={cargoResource?.ID ?? "none"} cargoAmount={cargoAmount:0.###} cargoMass={cargo.CargoMass:0.###} tank={craft.tankFuel:0.###}/{craft.tankFuelCapacity:0.###} designDV={scType.AvailableDeltaV:0.###} minMaxRel={scType.MinFlightTimeHohRel:0.###}/{scType.MaxFlightTimeHohRel:0.###}");
+        var flight = LogisticsFlightCalculator.CalculateSoonestOptimalFlight(from, to, vehicle, cargo, player,
+            requestedFlightPlanMode);
         if (flight == null || !flight.Success)
         {
             plan.Reason = flight?.Reason ?? "Could not calculate flight";
@@ -1590,39 +1799,148 @@ public static class LogisticsObserver
 
         plan.FuelType = flight.FuelType ?? plan.FuelType;
         plan.TravelDays = flight.TravelDays;
+        plan.DeltaV = flight.EstimatedDeltaV;
         plan.Departure = flight.Departure;
         plan.Arrival = flight.Arrival;
         plan.Fuel = flight.FlightFuel;
-        LogVerbose($"GHOST estimate-leg: {from.ObjectName}->{to.ObjectName} ship={craft.shipName} cargo={cargoResource?.ID ?? "none"}:{cargoAmount:0.#} fuel={plan.Fuel:0.#} days={flight.TravelDays:0.#} dV={flight.EstimatedDeltaV:0.##} route={flight.RouteKind}");
+        LogVerbose($"GHOST estimate-leg: {from.ObjectName}->{to.ObjectName} ship={craft.shipName} cargo={cargoResource?.ID ?? "none"}:{cargoAmount:0.#} fuel={plan.Fuel:0.#} days={flight.TravelDays:0.#} dV={flight.EstimatedDeltaV:0.##} route={flight.RouteKind} plan={flight.FlightPlanMode}");
         return true;
+    }
+
+    private static Data.LogisticsFlightPlanMode ResolveGhostCraftRequestedFlightPlanMode(
+        Data.GhostCraftRecord craft,
+        int routeId)
+    {
+        var route = routeId > 0
+            ? Data.LogisticsNetwork.FindRoute(routeId)
+            : Data.LogisticsNetwork.FindRoute(craft?.assignedRouteId ?? -1);
+        if (route != null)
+            return Data.LogisticsNetwork.GetRouteSpacecraftFlightPlanMode(route, craft?.shipTypeId);
+
+        return Data.LogisticsFlightPlanMode.Optimal;
     }
 
     public static void NormalizeGhostConvoys()
     {
+        var player = MonoBehaviourSingleton<GameManager>.Instance?.Player;
+        if (player != null)
+            RecoverBlockedReturnFuelCraft(player);
+
         foreach (var ownerOI in Data.LogisticsNetwork.GetAllObjects())
         {
             var ownerData = Data.LogisticsNetwork.Get(ownerOI);
             if (ownerData?.ghostFlights == null || ownerData.ghostFlights.Count == 0)
                 continue;
+
             MergeCompatibleGhostFlights(ownerData);
         }
+    }
+
+    private static void RecoverBlockedReturnFuelCraft(Company player)
+    {
+        if (player == null)
+            return;
+
+        var now = MonoBehaviourSingleton<TimeController>.Instance?.CurrentTime ?? DateTime.Now;
+        var activeFlightIds = new HashSet<string>(
+            Data.LogisticsNetwork.GetAllGhostFlights()
+                .Where(f => f != null
+                    && f.status != Data.GhostFlightStatus.Complete
+                    && f.status != Data.GhostFlightStatus.Cancelled)
+                .Select(f => f.flightId)
+                .Where(id => !string.IsNullOrWhiteSpace(id)),
+            StringComparer.Ordinal);
+
+        foreach (var ownerOI in Data.LogisticsNetwork.GetAllObjects().ToList())
+        {
+            var ownerData = Data.LogisticsNetwork.Get(ownerOI);
+            if (ownerOI == null || ownerData?.ghostCraft == null)
+                continue;
+
+            var groups = ownerData.ghostCraft
+                .Where(craft => IsBlockedByStaleReturnFuel(craft, activeFlightIds))
+                .GroupBy(craft => new
+                {
+                    craft.assignedRouteId,
+                    craft.currentObjectId,
+                    craft.homeObjectId,
+                    FlightId = craft.currentFlightId ?? ""
+                })
+                .ToList();
+
+            foreach (var group in groups)
+            {
+                var craftList = group.ToList();
+                var first = craftList.FirstOrDefault();
+                var current = ResolveObject(group.Key.currentObjectId);
+                var home = ResolveObject(group.Key.homeObjectId);
+                if (first == null || current == null || home == null || current == home)
+                    continue;
+
+                var travelDays = craftList
+                    .Select(craft => (craft.arrivalDate - craft.departureDate).TotalDays)
+                    .Where(days => days > 0.1)
+                    .DefaultIfEmpty(EstimateGhostTravelDays(current, home))
+                    .Max();
+                travelDays = Math.Max(1, travelDays);
+                var returnFlight = new Data.GhostFlightRecord
+                {
+                    flightId = Guid.NewGuid().ToString("N"),
+                    routeId = group.Key.assignedRouteId,
+                    craftLedgerIds = craftList.Select(craft => craft.ledgerId).Where(id => id > 0).Distinct().ToList(),
+                    homeObjectId = first.homeObjectId,
+                    fromObjectId = current.id,
+                    toObjectId = home.id,
+                    fuelResourceId = ResolveSpacecraftType(first.shipTypeId)?.GetFuelType()?.ID,
+                    outboundFuel = craftList.Sum(craft => Math.Max(0, craft.tankFuel)),
+                    returnFuel = 0,
+                    departureDate = now,
+                    arrivalDate = now.AddDays(travelDays),
+                    outboundTravelDays = travelDays,
+                    returnTravelDays = 0,
+                    status = Data.GhostFlightStatus.Returning,
+                    isReturnFlight = true
+                };
+
+                ownerData.ghostFlights ??= new List<Data.GhostFlightRecord>();
+                ownerData.ghostFlights.Add(returnFlight);
+                foreach (var craft in craftList)
+                {
+                    craft.tankFuel = 0;
+                    craft.status = Data.GhostCraftStatus.ReturningHome;
+                    craft.currentFlightId = returnFlight.flightId;
+                    craft.routeFromObjectId = current.id;
+                    craft.routeToObjectId = home.id;
+                    craft.departureDate = returnFlight.departureDate;
+                    craft.arrivalDate = returnFlight.arrivalDate;
+                    craft.cargoResourceId = null;
+                    craft.cargoAmount = 0;
+                    craft.blockedReason = null;
+                }
+
+                EnsureGhostFlightVisual(returnFlight, player);
+                LogWarning($"GHOST return-recovered: ships={craftList.Count} {current.ObjectName}->{home.ObjectName} fuel={returnFlight.outboundFuel:0.#} arrive={returnFlight.arrivalDate:yyyy-MM-dd}");
+            }
+        }
+    }
+
+    private static bool IsBlockedByStaleReturnFuel(Data.GhostCraftRecord craft, HashSet<string> activeFlightIds)
+    {
+        if (craft == null || craft.status != Data.GhostCraftStatus.Blocked)
+            return false;
+        if (craft.currentObjectId <= 0 || craft.homeObjectId <= 0 || craft.currentObjectId == craft.homeObjectId)
+            return false;
+        if (string.IsNullOrWhiteSpace(craft.blockedReason)
+            || !craft.blockedReason.StartsWith("Reserved return fuel missing", StringComparison.Ordinal))
+            return false;
+        return string.IsNullOrWhiteSpace(craft.currentFlightId)
+            || activeFlightIds == null
+            || !activeFlightIds.Contains(craft.currentFlightId);
     }
 
     private static double EstimateGhostTravelDays(ObjectInfo from, ObjectInfo to)
     {
         return LogisticsFlightCalculator.EstimateSoonestOptimalTravelDays(from, to);
-    }
-
-    private static double EstimateGhostLegFuel(SpacecraftType scType, ObjectInfo from, ObjectInfo to,
-        double cargoAmount, Company player)
-    {
-        if (scType == null || player == null)
-            return 0;
-
-        var vehicle = LogisticsFlightVehicleSnapshot.FromGhostCraft(null, scType, player);
-        var cargo = new LogisticsFlightCargoSnapshot { CargoMass = Math.Max(0, cargoAmount) };
-        var flight = LogisticsFlightCalculator.CalculateSoonestOptimalFlight(from, to, vehicle, cargo, player);
-        return flight != null && flight.Success ? flight.FlightFuel : 0;
     }
 
     private static DateTime GetGhostLegDeparture(GhostLegPlan plan, DateTime now)
@@ -1822,15 +2140,18 @@ public static class LogisticsObserver
         if (ownerData?.ghostFlights == null || flight == null || flight.isReturnFlight)
             return flight;
 
+        var now = MonoBehaviourSingleton<TimeController>.Instance?.CurrentTime ?? DateTime.Now;
+        if (flight.status != Data.GhostFlightStatus.Planned || now >= flight.departureDate)
+            return flight;
+
         flight.craftLedgerIds = GetGhostFlightCraftIds(flight);
         var shipTypeId = GetGhostFlightShipTypeId(flight);
         var existing = ownerData.ghostFlights.FirstOrDefault(other =>
             other != null
             && !ReferenceEquals(other, flight)
             && !other.isReturnFlight
-            && other.status != Data.GhostFlightStatus.Complete
-            && other.status != Data.GhostFlightStatus.Cancelled
-            && other.status != Data.GhostFlightStatus.Blocked
+            && other.status == Data.GhostFlightStatus.Planned
+            && now < other.departureDate
             && other.routeId == flight.routeId
             && other.homeObjectId == flight.homeObjectId
             && other.fromObjectId == flight.fromObjectId
@@ -1873,10 +2194,13 @@ public static class LogisticsObserver
         if (ownerData?.ghostFlights == null || ownerData.ghostFlights.Count <= 1)
             return;
 
+        var now = MonoBehaviourSingleton<TimeController>.Instance?.CurrentTime ?? DateTime.Now;
         foreach (var flight in ownerData.ghostFlights.ToList())
         {
             if (flight == null
                 || flight.isReturnFlight
+                || flight.status != Data.GhostFlightStatus.Planned
+                || now >= flight.departureDate
                 || flight.status == Data.GhostFlightStatus.Complete
                 || flight.status == Data.GhostFlightStatus.Cancelled
                 || flight.status == Data.GhostFlightStatus.Blocked)
@@ -2425,9 +2749,16 @@ public static class LogisticsObserver
                      .OrderBy(option => option.TierAdjustment)
                      .ThenBy(option => option.Type?.Name ?? "LV", StringComparer.OrdinalIgnoreCase))
         {
-            if (option.Vehicle == null || option.Type == null) continue;
-            if (option.Vehicle.GetCompany() != player || option.Vehicle.objectInfo != providerOI) continue;
-            if (!option.Vehicle.IsReadyToLaunchReusable()) continue;
+            if (option.Type == null) continue;
+            if (option.Vehicle != null)
+            {
+                if (option.Vehicle.GetCompany() != player || option.Vehicle.objectInfo != providerOI) continue;
+                if (!option.Vehicle.IsReadyToLaunchReusable()) continue;
+            }
+            else if (!IsBuiltEnabledLaunchSupportFacility(option.Facility, option.Category))
+            {
+                continue;
+            }
 
             result.Add(option);
         }
@@ -2449,7 +2780,9 @@ public static class LogisticsObserver
         if (providerOI == null || player == null)
             return result;
 
-        result.AddRange(GetVirtualSurfaceLiftSupport(providerOI, player, snapshot));
+        var route = routeId > 0 ? Data.LogisticsNetwork.FindRoute(routeId) : null;
+        result.AddRange(GetVirtualSurfaceLiftSupport(providerOI, player, snapshot)
+            .Where(option => IsRouteFacilityLaunchAllowed(route, option)));
 
         var data = Data.LogisticsNetwork.Get(providerOI);
         Data.LogisticsNetwork.RefreshReservedLaunchVehicles(data);
@@ -2487,6 +2820,48 @@ public static class LogisticsObserver
         if (option?.Type == null)
             return false;
         return option.IsFacilityBacked || string.Equals(option.Category, "space-elevator", StringComparison.Ordinal);
+    }
+
+    private static bool IsRouteFacilityLaunchAllowed(Data.LogisticsRouteRecord route, LaunchSupportOption option)
+    {
+        if (route == null || option == null || option.ReservedLaunchVehicle != null || !IsVirtualSurfaceLiftSupport(option))
+            return true;
+
+        var disabled = route.disabledFacilityLaunchCategories;
+        if (disabled == null || disabled.Count == 0)
+            return true;
+
+        var category = NormalizeLaunchSupportCategory(option.Category);
+        if (string.IsNullOrWhiteSpace(category))
+            return true;
+
+        return !disabled.Any(disabledCategory =>
+        {
+            var disabledCategoryName = NormalizeLaunchSupportCategory(disabledCategory);
+            return !string.IsNullOrWhiteSpace(disabledCategoryName)
+                && string.Equals(disabledCategoryName, category, StringComparison.Ordinal);
+        });
+    }
+
+    private static string NormalizeLaunchSupportCategory(string category)
+    {
+        if (string.IsNullOrWhiteSpace(category))
+            return "";
+
+        switch (category.Trim().ToLowerInvariant())
+        {
+            case "magnetic-launch-rails":
+            case "launch-pad":
+            case "rotary-launcher":
+            case "space-elevator":
+            case "electromagnetic-catapult":
+            case "stationary-mass-driver":
+            case "reserved-launch-vehicle":
+            case "standard-launch":
+                return category.Trim().ToLowerInvariant();
+            default:
+                return "";
+        }
     }
 
     private static bool TryBuildVirtualLiftPlan(ObjectInfo providerOI, ObjectInfo requester,
@@ -2799,12 +3174,19 @@ public static class LogisticsObserver
     {
         if (option == null)
             return false;
-        return !(IsHumanResource(rd) && IsSpinLaunchSupport(option));
+        if (IsHumanResource(rd) && IsSharedFacilityLiftSupport(option) && !IsSpaceElevatorSupport(option))
+            return false;
+        return true;
     }
 
-    private static bool IsSpinLaunchSupport(LaunchSupportOption option)
+    private static bool IsSharedFacilityLiftSupport(LaunchSupportOption option)
     {
-        return string.Equals(option?.Category, "spin-launch", StringComparison.Ordinal);
+        return option != null && option.ReservedLaunchVehicle == null && IsVirtualSurfaceLiftSupport(option);
+    }
+
+    private static bool IsSpaceElevatorSupport(LaunchSupportOption option)
+    {
+        return string.Equals(option?.Category, "space-elevator", StringComparison.Ordinal);
     }
 
     private static bool IsHumanResource(ResourceDefinition rd)
@@ -3214,9 +3596,53 @@ public static class LogisticsObserver
     private static bool IsOrbitOf(ObjectInfo orbit, ObjectInfo body)
     {
         if (orbit == null || body == null) return false;
-        if (body.LowOrbitCustom != null && body.LowOrbitCustom.GetObjectInfo() == orbit)
+        if (body.LowOrbitCustom != null && SameObjectInfo(body.LowOrbitCustom.GetObjectInfo(), orbit))
             return true;
-        return orbit.objectTypes == global::Data.EObjectTypes.Orbit && orbit.parentObjectInfo == body;
+        if (orbit.objectTypes == global::Data.EObjectTypes.Orbit && SameObjectInfo(orbit.parentObjectInfo, body))
+            return true;
+        return LooksLikeOrbitOfBody(orbit, body);
+    }
+
+    private static bool SameObjectInfo(ObjectInfo left, ObjectInfo right)
+    {
+        if (left == null || right == null)
+            return left == right;
+        return left == right || left.id == right.id;
+    }
+
+    private static bool LooksLikeOrbitOfBody(ObjectInfo orbit, ObjectInfo body)
+    {
+        if (orbit == null || body == null)
+            return false;
+        if (orbit.objectTypes != global::Data.EObjectTypes.Orbit
+            && !ContainsOrbitMarker(orbit.ObjectName))
+            return false;
+
+        var orbitBodyName = CanonicalBodyName(orbit);
+        var bodyName = CanonicalBodyName(body);
+        return !string.IsNullOrWhiteSpace(orbitBodyName)
+            && !string.IsNullOrWhiteSpace(bodyName)
+            && string.Equals(orbitBodyName, bodyName, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool ContainsOrbitMarker(string name)
+    {
+        return !string.IsNullOrWhiteSpace(name)
+            && name.IndexOf("[ORBIT]", StringComparison.OrdinalIgnoreCase) >= 0;
+    }
+
+    private static string CanonicalBodyName(ObjectInfo oi)
+    {
+        if (oi == null)
+            return "";
+        if (oi.objectTypes == global::Data.EObjectTypes.Orbit && oi.parentObjectInfo != null)
+            return CanonicalBodyName(oi.parentObjectInfo);
+
+        var name = oi.ObjectName ?? "";
+        var orbitIndex = name.IndexOf("[ORBIT]", StringComparison.OrdinalIgnoreCase);
+        if (orbitIndex >= 0)
+            name = (name.Substring(0, orbitIndex) + name.Substring(orbitIndex + "[ORBIT]".Length)).Trim();
+        return name.Trim();
     }
 
     private static Data.LogisticsProvider FindAllowedProviderRule(Data.LogisticsObjectData providerData,
@@ -3357,7 +3783,152 @@ public static class LogisticsObserver
             });
         }
 
+        AddBuiltFacilityLaunchSupport(result, objectData, providerOI, player);
+
         return result;
+    }
+
+    private static void AddBuiltFacilityLaunchSupport(List<LaunchSupportOption> result, ObjectInfoData objectData,
+        ObjectInfo providerOI, Company player)
+    {
+        if (result == null || objectData?.ListFacility == null || providerOI == null || player == null)
+            return;
+
+        foreach (var facility in objectData.ListFacility)
+        {
+            if (!TryGetBuiltEnabledLaunchSupportCategory(facility, out var category))
+                continue;
+            if (result.Any(option => string.Equals(
+                    NormalizeLaunchSupportCategory(option?.Category),
+                    category,
+                    StringComparison.Ordinal)))
+                continue;
+
+            var type = ResolveFacilityLaunchSupportType(facility, category);
+            if (type == null)
+            {
+                LogWarning($"Built launch facility {FacilityLaunchSupportDisplayName(facility.facilityDescriptor)} at {providerOI.ObjectName} has no matching launch support type for {category}.");
+                continue;
+            }
+
+            result.Add(new LaunchSupportOption
+            {
+                Vehicle = null,
+                Type = type,
+                Facility = facility,
+                Category = category,
+                IsFacilityBacked = true,
+                Label = $"{type.Name ?? type.ID ?? "Launch Support"} via {FacilityLaunchSupportDisplayName(facility.facilityDescriptor)} [{category}]",
+                TierAdjustment = GetLaunchSupportTierAdjustment(category)
+            });
+        }
+    }
+
+    private static bool IsBuiltEnabledLaunchSupportFacility(Facility facility, string expectedCategory)
+    {
+        if (!TryGetBuiltEnabledLaunchSupportCategory(facility, out var category))
+            return false;
+        var normalizedExpected = NormalizeLaunchSupportCategory(expectedCategory);
+        return string.IsNullOrWhiteSpace(normalizedExpected)
+            || string.Equals(category, normalizedExpected, StringComparison.Ordinal);
+    }
+
+    private static bool TryGetBuiltEnabledLaunchSupportCategory(Facility facility, out string category)
+    {
+        category = "";
+        if (facility?.facilityDescriptor == null)
+            return false;
+        if (facility.BuildProgress < 1f || facility.Enabled <= 0 || facility.SinglePowerProductionMultiplier < 0.999)
+            return false;
+
+        category = GetLaunchSupportCategory(facility.facilityDescriptor);
+        return IsFacilityLaunchSupportCategory(category)
+            && IsLaunchSupportFacilityDescriptor(facility.facilityDescriptor, category);
+    }
+
+    private static string GetLaunchSupportCategory(FacilityBaseDescriptor descriptor)
+    {
+        if (descriptor == null)
+            return "";
+
+        var type = ResolveFakeLaunchSupportType(descriptor as GroundFacilityDescriptor);
+        return NormalizeLaunchSupportCategory(ClassifyLaunchSupport(
+            BuildLaunchSupportSearchText(descriptor.Name, descriptor.ID, descriptor.name),
+            BuildLaunchSupportSearchText(type?.Name, type?.ID, type?.name)));
+    }
+
+    private static bool IsLaunchSupportFacilityDescriptor(FacilityBaseDescriptor descriptor, string category)
+    {
+        if (descriptor == null)
+            return false;
+
+        var normalized = NormalizeLaunchSupportCategory(category);
+        if (string.Equals(normalized, "space-elevator", StringComparison.Ordinal)
+            && descriptor is GroundFacilityDescriptor elevatorGround
+            && elevatorGround.bonusData?.spaceElevatorPrefab3dView != null)
+            return true;
+
+        if (descriptor is GroundFacilityDescriptor ground)
+        {
+            if (ground.facilityType.HasFlag(FacilityBaseDescriptor.EFacilityType.LaunchFacility)
+                || ground.bonusData?.bonus == EBonus.LaunchCostOptionInPlanMission)
+                return true;
+
+            var type = ResolveFakeLaunchSupportType(ground);
+            if (type != null && LaunchSupportSearchTextMatchesCategory(
+                    BuildLaunchSupportSearchText(type.Name, type.ID, type.name),
+                    normalized))
+                return true;
+        }
+
+        return LaunchSupportSearchTextMatchesCategory(
+            BuildLaunchSupportSearchText(descriptor.Name, descriptor.ID, descriptor.name),
+            normalized);
+    }
+
+    private static bool IsFacilityLaunchSupportCategory(string category)
+    {
+        switch (NormalizeLaunchSupportCategory(category))
+        {
+            case "magnetic-launch-rails":
+            case "launch-pad":
+            case "rotary-launcher":
+            case "space-elevator":
+            case "electromagnetic-catapult":
+            case "stationary-mass-driver":
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    private static LaunchVehicleType ResolveFakeLaunchSupportType(GroundFacilityDescriptor ground)
+    {
+        var allTypes = SerializedMonoBehaviourSingleton<AllScriptableObjectManager>.Instance?.AllLaunchVehicleType;
+        if (allTypes == null || string.IsNullOrWhiteSpace(ground?.bonusData?.fakeLVId))
+            return null;
+
+        return allTypes.GetByID(ground.bonusData.fakeLVId);
+    }
+
+    private static LaunchVehicleType ResolveFacilityLaunchSupportType(Facility facility, string category)
+    {
+        var allTypes = SerializedMonoBehaviourSingleton<AllScriptableObjectManager>.Instance?.AllLaunchVehicleType;
+        if (allTypes == null)
+            return null;
+
+        var fakeType = ResolveFakeLaunchSupportType(facility?.facilityDescriptor as GroundFacilityDescriptor);
+        if (fakeType != null)
+            return fakeType;
+
+        return allTypes.ListNotEmpty?
+            .Where(type => type != null)
+            .Where(type => LaunchSupportSearchTextMatchesCategory(
+                BuildLaunchSupportSearchText(type.Name, type.ID, type.name),
+                category))
+            .OrderByDescending(type => type.FakeForFacility)
+            .ThenBy(type => type.Name ?? type.ID ?? "", StringComparer.OrdinalIgnoreCase)
+            .FirstOrDefault();
     }
 
     private static string BuildLaunchSupportLabel(LaunchVehicle lv, Facility facility, string category)
@@ -3365,7 +3936,7 @@ public static class LogisticsObserver
         var lvName = lv?.launchVehicleType?.Name ?? "LV";
         if (facility != null)
         {
-            var facilityName = facility.facilityDescriptor?.GetText(longText: false) ?? facility.GetType().Name;
+            var facilityName = FacilityLaunchSupportDisplayName(facility.facilityDescriptor);
             return $"{lvName} via {facilityName} [{category}]";
         }
 
@@ -3379,7 +3950,10 @@ public static class LogisticsObserver
     {
         if (facility != null)
         {
-            var facilityName = facility.facilityDescriptor?.GetText(longText: false) ?? facility.GetType().Name;
+            var facilityName = BuildLaunchSupportSearchText(
+                facility.facilityDescriptor?.Name,
+                facility.facilityDescriptor?.ID,
+                facility.facilityDescriptor?.name);
             return ClassifyLaunchSupport(facilityName, lv?.launchVehicleType?.Name ?? "LV");
         }
 
@@ -3391,14 +3965,76 @@ public static class LogisticsObserver
 
     private static string ClassifyLaunchSupport(string facilityName, string lvName)
     {
-        var text = $"{facilityName} {lvName}".ToLowerInvariant();
+        var text = BuildLaunchSupportSearchText(facilityName, lvName);
         if (text.Contains("elevator"))
             return "space-elevator";
-        if (text.Contains("spin"))
-            return "spin-launch";
-        if (text.Contains("magnetic") || text.Contains("rail") || text.Contains("catapult") || text.Contains("mass driver"))
-            return "magnetic-rail";
-        return "facility-launch";
+        if (text.Contains("rotary") || text.Contains("spin"))
+            return "rotary-launcher";
+        if (text.Contains("launch pad") || text.Contains("launchpad") || text.Contains(" pad"))
+            return "launch-pad";
+        if (text.Contains("electromagnetic") || text.Contains("catapult"))
+            return "electromagnetic-catapult";
+        if (text.Contains("mass driver"))
+            return "stationary-mass-driver";
+        if (text.Contains("magnetic launch rail") || text.Contains("magnetic rail") || text.Contains("launch rail")
+            || text.Contains("magrail") || text.Contains(" rail"))
+            return "magnetic-launch-rails";
+        return "launch-pad";
+    }
+
+    private static string FacilityLaunchSupportDisplayName(FacilityBaseDescriptor facility)
+    {
+        if (facility == null)
+            return "Facility";
+        if (!string.IsNullOrWhiteSpace(facility.Name))
+            return facility.Name;
+        if (!string.IsNullOrWhiteSpace(facility.ID))
+            return facility.ID;
+        return facility.name ?? "Facility";
+    }
+
+    private static string BuildLaunchSupportSearchText(params string[] parts)
+    {
+        var text = string.Join(" ", parts.Where(part => !string.IsNullOrWhiteSpace(part)));
+        if (string.IsNullOrWhiteSpace(text))
+            return "";
+
+        text = text.Replace('_', ' ').Replace('-', ' ').ToLowerInvariant();
+        while (text.Contains("  "))
+            text = text.Replace("  ", " ");
+        return text.Trim();
+    }
+
+    private static bool LaunchSupportSearchTextMatchesCategory(string text, string category)
+    {
+        if (string.IsNullOrWhiteSpace(text) || string.IsNullOrWhiteSpace(category))
+            return false;
+
+        switch (NormalizeLaunchSupportCategory(category))
+        {
+            case "magnetic-launch-rails":
+                return text.Contains("magnetic launch rail")
+                    || text.Contains("magnetic rail")
+                    || text.Contains("launch rail")
+                    || text.Contains("magrail")
+                    || text.Contains(" rail");
+            case "launch-pad":
+                return text.Contains("launch pad")
+                    || text.Contains("launchpad")
+                    || text.Contains(" pad")
+                    || text.Contains("launch facility")
+                    || text.Contains("facility");
+            case "rotary-launcher":
+                return text.Contains("rotary") || text.Contains("spin");
+            case "space-elevator":
+                return text.Contains("elevator");
+            case "electromagnetic-catapult":
+                return text.Contains("electromagnetic") || text.Contains("catapult");
+            case "stationary-mass-driver":
+                return text.Contains("mass driver");
+            default:
+                return false;
+        }
     }
 
     private static int GetLaunchSupportTierAdjustment(string category)
@@ -3407,11 +4043,15 @@ public static class LogisticsObserver
         {
             case "space-elevator":
                 return -45;
-            case "spin-launch":
+            case "rotary-launcher":
                 return -40;
-            case "magnetic-rail":
+            case "electromagnetic-catapult":
+                return -39;
+            case "magnetic-launch-rails":
                 return -38;
-            case "facility-launch":
+            case "stationary-mass-driver":
+                return -36;
+            case "launch-pad":
                 return -24;
             default:
                 return 0;

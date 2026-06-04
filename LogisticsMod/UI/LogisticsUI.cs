@@ -1,3 +1,5 @@
+using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using CustomUpdate;
@@ -15,6 +17,8 @@ using TMPro;
 using UnityEngine;
 using UnityEngine.EventSystems;
 using UnityEngine.UI;
+using LaunchVehicleType = global::Data.ScriptableObject.LaunchVehicleType;
+using SpacecraftType = global::Data.ScriptableObject.SpacecraftType;
 
 namespace LogisticsMod.UI;
 
@@ -24,14 +28,53 @@ public class LogisticsUI : MonoBehaviour
     private const int SectionIndexLaunchVehicle = 4;
     private const float RouteResourceTargetStatusGap = 14f;
     private const float RouteHeaderNameMaxWidth = 190f;
+    private const float RouteStickyHeaderNameMaxWidth = 124f;
+    private const float RouteHeaderArrowWidth = 28f;
     private const float RouteOverviewDetailPanelIndent = 24f;
     private const float RouteOverviewDetailContentInset = 32f;
     private const float RouteOverviewDetailRightInset = 8f;
     private const float RouteOverviewDetailBottomInset = 4f;
     private const float RouteOverviewGroupGap = 12f;
+    private const float RouteResourceRowHeight = 34f;
+    private const float GhostFlightRowHeight = 46f;
     private const float RouteAssetNumberColumnWidth = 48f;
     private const float RouteAssetIconColumnWidth = 46f;
     private const float RouteAssetNameColumnWidth = 160f;
+    private const float FlightPlanModeControlsWidth = 150f;
+    private const float FlightPlanModeFastButtonWidth = 58f;
+    private const float FlightPlanModeOptimalButtonWidth = 76f;
+    private const float FlightPlanModeButtonGap = 4f;
+    private const float FlightPlanModeButtonGroupWidth =
+        FlightPlanModeFastButtonWidth + FlightPlanModeButtonGap + FlightPlanModeOptimalButtonWidth;
+    private const float FlightPlanModeColumnGap = 10f;
+    private const float RouteFacilityLaunchOptionWidth = 176f;
+    private const float RouteFacilityLaunchOptionHeight = 54f;
+    private const float RouteFacilityLaunchIconColumnWidth = 42f;
+    private const int RouteFacilityLaunchSectionHorizontalPadding = 0;
+    private const int RouteFacilityLaunchSectionVerticalPadding = 8;
+    private const int RouteFacilityLaunchTileHorizontalPadding = 8;
+    private const int RouteFacilityLaunchTileVerticalPadding = 6;
+    private const float RouteFacilityLaunchTileGap = 6f;
+    private const int RouteFacilityLaunchTilesPerRow = 3;
+    private const float RouteEditorLiveRefreshIntervalSeconds = 0.5f;
+    private const int VirtualListBufferRows = 5;
+    private const int BodySwitcherCrowdedChildThreshold = 6;
+    private const string RouteLaunchCategoryMagneticRails = "magnetic-launch-rails";
+    private const string RouteLaunchCategoryLaunchPad = "launch-pad";
+    private const string RouteLaunchCategoryRotary = "rotary-launcher";
+    private const string RouteLaunchCategorySpaceElevator = "space-elevator";
+    private const string RouteLaunchCategoryElectromagneticCatapult = "electromagnetic-catapult";
+    private const string RouteLaunchCategoryMassDriver = "stationary-mass-driver";
+
+    private static readonly string[] RouteFacilityLaunchCategories =
+    {
+        RouteLaunchCategoryMagneticRails,
+        RouteLaunchCategoryLaunchPad,
+        RouteLaunchCategoryRotary,
+        RouteLaunchCategorySpaceElevator,
+        RouteLaunchCategoryElectromagneticCatapult,
+        RouteLaunchCategoryMassDriver
+    };
 
     private static readonly Color VoidColor = UiColor(0x07, 0x08, 0x0A);
     private static readonly Color PanelColor = UiColor(0x0D, 0x0F, 0x13);
@@ -52,6 +95,7 @@ public class LogisticsUI : MonoBehaviour
     private static readonly Color PanelOuterColor = WithAlpha(PanelColor, 0.98f);
     private static readonly Color PanelInnerColor = PanelOuterColor;
     private static readonly Color HeaderBarColor = WithAlpha(CardColor, 0.98f);
+    private static readonly Color RouteSubheaderBarColor = UiColor(0x10, 0x12, 0x17, 0.98f);
     private static readonly Color RowBgColor = WithAlpha(CardColor, 0.96f);
     private static readonly Color RowBgMutedColor = WithAlpha(PanelColor, 0.94f);
     private static readonly Color AccentLineColor = WithAlpha(BorderColor, 0.82f);
@@ -104,8 +148,15 @@ public class LogisticsUI : MonoBehaviour
     private GameObject _popupRoot;
     private RectTransform _popupPanelRt;
     private RectTransform _popupContentRt;
+    private ScrollRect _popupScroll;
     private Image _popupTitleIcon;
     private TextMeshProUGUI _popupTitle;
+    private RectTransform _popupBodySwitchRow;
+    private RectTransform _popupRouteSubheader;
+    private int _activeRouteEditorRouteId = -1;
+    private bool _routeEditorMainPageVisible;
+    private DateTime _lastRouteEditorRefreshTime = DateTime.MinValue;
+    private float _nextRouteEditorLiveRefreshAt;
     private bool _popupRegisteredOpen;
 
     private LogisticsSection _getSection;
@@ -192,8 +243,8 @@ public class LogisticsUI : MonoBehaviour
 
     private sealed class SmoothPopupScroll : MonoBehaviour, IScrollHandler, IBeginDragHandler, IDragHandler, IEndDragHandler
     {
-        private const float WheelPixelsPerTick = 82f;
-        private const float SmoothTime = 0.1f;
+        private const float WheelPixelsPerTick = 118f;
+        private const float SmoothTime = 0.075f;
         private const float MiddleScrollDeadZone = 12f;
         private const float MiddleScrollPixelsPerSecondPerPixel = 6.5f;
         private const float MiddleScrollMaxPixelsPerSecond = 1800f;
@@ -203,6 +254,7 @@ public class LogisticsUI : MonoBehaviour
         private float _velocityY;
         private bool _dragging;
         private bool _middleScrolling;
+        private bool _hasSmoothTarget;
         private Vector2 _middleAnchorScreen;
 
         public void Attach(ScrollRect scroll, TMP_FontAsset font)
@@ -249,12 +301,14 @@ public class LogisticsUI : MonoBehaviour
             }
 
             _targetY = Mathf.Clamp01(_targetY + eventData.scrollDelta.y * (WheelPixelsPerTick / hiddenHeight));
+            _hasSmoothTarget = true;
             eventData.Use();
         }
 
         public void OnBeginDrag(PointerEventData eventData)
         {
             _dragging = true;
+            _hasSmoothTarget = false;
             SyncToCurrent();
         }
 
@@ -266,6 +320,7 @@ public class LogisticsUI : MonoBehaviour
         public void OnEndDrag(PointerEventData eventData)
         {
             _dragging = false;
+            _hasSmoothTarget = false;
             SyncToCurrent();
         }
 
@@ -274,7 +329,8 @@ public class LogisticsUI : MonoBehaviour
             if (_scroll == null || _scroll.content == null || _scroll.viewport == null)
                 return;
 
-            HandleMiddleClickScroll();
+            if (_middleScrolling || Input.GetMouseButtonDown(2))
+                HandleMiddleClickScroll();
 
             if (_middleScrolling)
             {
@@ -289,11 +345,15 @@ public class LogisticsUI : MonoBehaviour
                 return;
             }
 
+            if (!_hasSmoothTarget)
+                return;
+
             var hiddenHeight = _scroll.content.rect.height - _scroll.viewport.rect.height;
             if (hiddenHeight <= 0f)
             {
                 _targetY = 1f;
                 _velocityY = 0f;
+                _hasSmoothTarget = false;
                 return;
             }
 
@@ -302,6 +362,7 @@ public class LogisticsUI : MonoBehaviour
             {
                 _scroll.verticalNormalizedPosition = _targetY;
                 _velocityY = 0f;
+                _hasSmoothTarget = false;
                 return;
             }
 
@@ -347,6 +408,7 @@ public class LogisticsUI : MonoBehaviour
             var pixelsPerSecond = Mathf.Min(MiddleScrollMaxPixelsPerSecond, magnitude * MiddleScrollPixelsPerSecondPerPixel);
             var direction = Mathf.Sign(offset);
             _targetY = Mathf.Clamp01(_targetY + direction * pixelsPerSecond * Time.unscaledDeltaTime / hiddenHeight);
+            _hasSmoothTarget = false;
             _scroll.verticalNormalizedPosition = Mathf.SmoothDamp(_scroll.verticalNormalizedPosition, _targetY,
                 ref _velocityY, SmoothTime, Mathf.Infinity, Time.unscaledDeltaTime);
         }
@@ -422,6 +484,232 @@ public class LogisticsUI : MonoBehaviour
                 return;
             _targetY = _scroll.verticalNormalizedPosition;
             _velocityY = 0f;
+            _hasSmoothTarget = false;
+        }
+    }
+
+    private sealed class VirtualFixedList : MonoBehaviour
+    {
+        private readonly Dictionary<int, GameObject> _activeRows = new Dictionary<int, GameObject>();
+        private readonly Stack<GameObject> _pooledRows = new Stack<GameObject>();
+        private readonly List<int> _scratchIndexes = new List<int>();
+        private ScrollRect _scroll;
+        private RectTransform _viewport;
+        private RectTransform _listRt;
+        private LayoutElement _layout;
+        private Func<Transform, float, GameObject> _createRow;
+        private Action<GameObject, int> _bindRow;
+        private int _count;
+        private int _bufferRows;
+        private float _rowHeight;
+        private bool _dirty = true;
+        private float _lastScroll = -1f;
+        private float _lastViewportHeight = -1f;
+        private float _lastListTop = float.MinValue;
+
+        public void Configure(ScrollRect scroll, int count, float rowHeight,
+            Func<Transform, float, GameObject> createRow, Action<GameObject, int> bindRow, int bufferRows)
+        {
+            if (_scroll != null)
+                _scroll.onValueChanged.RemoveListener(OnScrollValueChanged);
+
+            _scroll = scroll;
+            _viewport = scroll?.viewport;
+            _listRt = transform as RectTransform;
+            _layout = GetComponent<LayoutElement>();
+            _count = Mathf.Max(0, count);
+            _rowHeight = Mathf.Max(1f, rowHeight);
+            _createRow = createRow;
+            _bindRow = bindRow;
+            _bufferRows = Mathf.Max(1, bufferRows);
+
+            if (_layout != null)
+            {
+                _layout.minHeight = _count * _rowHeight;
+                _layout.preferredHeight = _layout.minHeight;
+                _layout.flexibleHeight = 0f;
+                _layout.flexibleWidth = 1f;
+            }
+
+            if (_scroll != null)
+                _scroll.onValueChanged.AddListener(OnScrollValueChanged);
+
+            _dirty = true;
+            RefreshVisibleRows(true);
+        }
+
+        private void OnDestroy()
+        {
+            if (_scroll != null)
+                _scroll.onValueChanged.RemoveListener(OnScrollValueChanged);
+        }
+
+        private void OnEnable()
+        {
+            _dirty = true;
+        }
+
+        private void LateUpdate()
+        {
+            if (_scroll == null || _viewport == null || _listRt == null)
+                return;
+
+            var viewportHeight = _viewport.rect.height;
+            var scrollValue = _scroll.verticalNormalizedPosition;
+            var listTop = CurrentListTop();
+            if (!_dirty
+                && Mathf.Abs(scrollValue - _lastScroll) < 0.0001f
+                && Mathf.Abs(viewportHeight - _lastViewportHeight) < 0.5f
+                && Mathf.Abs(listTop - _lastListTop) < 0.5f)
+                return;
+
+            RefreshVisibleRows(false);
+        }
+
+        private void OnScrollValueChanged(Vector2 _)
+        {
+            _dirty = true;
+        }
+
+        private void RefreshVisibleRows(bool force)
+        {
+            _dirty = false;
+            _lastScroll = _scroll != null ? _scroll.verticalNormalizedPosition : -1f;
+            _lastViewportHeight = _viewport != null ? _viewport.rect.height : -1f;
+            _lastListTop = CurrentListTop();
+
+            if (_count <= 0 || _createRow == null || _bindRow == null || _listRt == null || _viewport == null)
+            {
+                ReleaseAllRows();
+                return;
+            }
+
+            var totalHeight = _count * _rowHeight;
+            if (!TryGetVisibleRange(totalHeight, out var first, out var last))
+            {
+                ReleaseAllRows();
+                return;
+            }
+
+            _scratchIndexes.Clear();
+            foreach (var index in _activeRows.Keys)
+                if (force || index < first || index > last)
+                    _scratchIndexes.Add(index);
+            foreach (var index in _scratchIndexes)
+                ReleaseRow(index);
+
+            for (var index = first; index <= last; index++)
+            {
+                if (_activeRows.ContainsKey(index))
+                    continue;
+
+                var row = AcquireRow(index);
+                _activeRows[index] = row;
+                _bindRow(row, index);
+            }
+
+            var sibling = 0;
+            for (var index = first; index <= last; index++)
+            {
+                if (_activeRows.TryGetValue(index, out var row))
+                    row.transform.SetSiblingIndex(sibling++);
+            }
+        }
+
+        private bool TryGetVisibleRange(float totalHeight, out int first, out int last)
+        {
+            first = 0;
+            last = -1;
+
+            var listCorners = new Vector3[4];
+            var viewportCorners = new Vector3[4];
+            _listRt.GetWorldCorners(listCorners);
+            _viewport.GetWorldCorners(viewportCorners);
+
+            var scale = Mathf.Max(0.001f, Mathf.Abs(_listRt.lossyScale.y));
+            var listTop = listCorners[1].y;
+            var viewportBottom = viewportCorners[0].y;
+            var viewportTop = viewportCorners[1].y;
+
+            var visibleStart = Mathf.Max(0f, (listTop - viewportTop) / scale);
+            var visibleEnd = Mathf.Min(totalHeight, (listTop - viewportBottom) / scale);
+            if (visibleEnd <= 0f || visibleStart >= totalHeight)
+                return false;
+
+            first = Mathf.Clamp(Mathf.FloorToInt(visibleStart / _rowHeight) - _bufferRows, 0, _count - 1);
+            last = Mathf.Clamp(Mathf.CeilToInt(visibleEnd / _rowHeight) + _bufferRows, 0, _count - 1);
+            return last >= first;
+        }
+
+        private float CurrentListTop()
+        {
+            if (_listRt == null)
+                return float.MinValue;
+
+            var corners = new Vector3[4];
+            _listRt.GetWorldCorners(corners);
+            return corners[1].y;
+        }
+
+        private GameObject AcquireRow(int index)
+        {
+            var row = _pooledRows.Count > 0
+                ? _pooledRows.Pop()
+                : _createRow(transform, _rowHeight);
+            row.name = $"VirtualRow_{index}";
+            row.SetActive(true);
+            PrepareRowForReuse(row);
+            var rt = row.transform as RectTransform;
+            if (rt != null)
+            {
+                rt.anchorMin = new Vector2(0f, 1f);
+                rt.anchorMax = new Vector2(1f, 1f);
+                rt.pivot = new Vector2(0.5f, 1f);
+                rt.offsetMin = new Vector2(0f, rt.offsetMin.y);
+                rt.offsetMax = new Vector2(0f, rt.offsetMax.y);
+                rt.sizeDelta = new Vector2(0f, _rowHeight);
+                rt.anchoredPosition = new Vector2(0f, -index * _rowHeight);
+            }
+            return row;
+        }
+
+        private void PrepareRowForReuse(GameObject row)
+        {
+            if (row == null)
+                return;
+
+            foreach (var button in row.GetComponents<Button>())
+                DestroyImmediate(button);
+
+            var image = row.GetComponent<Image>();
+            if (image != null)
+                image.raycastTarget = false;
+
+            var children = new List<GameObject>();
+            foreach (Transform child in row.transform)
+                if (child != null)
+                    children.Add(child.gameObject);
+            foreach (var child in children)
+                DestroyImmediate(child);
+        }
+
+        private void ReleaseRow(int index)
+        {
+            if (!_activeRows.TryGetValue(index, out var row))
+                return;
+
+            _activeRows.Remove(index);
+            row.SetActive(false);
+            _pooledRows.Push(row);
+        }
+
+        private void ReleaseAllRows()
+        {
+            _scratchIndexes.Clear();
+            foreach (var index in _activeRows.Keys)
+                _scratchIndexes.Add(index);
+            foreach (var index in _scratchIndexes)
+                ReleaseRow(index);
         }
     }
 
@@ -436,6 +724,23 @@ public class LogisticsUI : MonoBehaviour
         Positive,
         Warning,
         Destructive
+    }
+
+    private sealed class RouteResourceTableItem
+    {
+        public Data.LogisticsRouteResourceRule Rule;
+        public int Index;
+        public ResourceDefinition Resource;
+    }
+
+    private sealed class RouteFacilityLaunchOptionUi
+    {
+        public string Category;
+        public string Icon;
+        public Sprite IconSprite;
+        public int Count;
+        public bool IsAvailable;
+        public readonly List<string> Details = new List<string>();
     }
 
     private struct ButtonVisualStyle
@@ -533,7 +838,7 @@ public class LogisticsUI : MonoBehaviour
             var border = _selected ? _style.SelectedBorder : _style.NormalBorder;
             var text = _selected ? _style.SelectedText : _style.NormalText;
 
-            if (_hovered)
+            if (_hovered && !_selected)
             {
                 fill = _style.HoverFill;
                 border = _style.HoverBorder;
@@ -555,6 +860,170 @@ public class LogisticsUI : MonoBehaviour
             foreach (var label in GetComponentsInChildren<TextMeshProUGUI>(true))
                 if (label != null)
                     label.color = text;
+        }
+    }
+
+    private sealed class SmallHoverTooltip : MonoBehaviour, IPointerEnterHandler, IPointerExitHandler
+    {
+        private const float DelaySeconds = 0.14f;
+        private const float TooltipHeight = 22f;
+        private const float MaxTooltipWidth = 220f;
+        private const float ScreenPadding = 4f;
+        private const float GapBelowButton = 6f;
+
+        private string _text;
+        private TMP_FontAsset _font;
+        private RectTransform _overlayRoot;
+        private GameObject _tooltip;
+        private bool _hovered;
+        private float _hoverStartedAt;
+
+        public void Configure(string text, TMP_FontAsset font, RectTransform overlayRoot)
+        {
+            _text = string.IsNullOrWhiteSpace(text) ? "?" : text.Trim();
+            _font = font;
+            _overlayRoot = overlayRoot;
+        }
+
+        public void OnPointerEnter(PointerEventData eventData)
+        {
+            _hovered = true;
+            _hoverStartedAt = Time.unscaledTime;
+        }
+
+        public void OnPointerExit(PointerEventData eventData)
+        {
+            _hovered = false;
+            Hide();
+        }
+
+        private void OnDisable()
+        {
+            _hovered = false;
+            Hide();
+        }
+
+        private void OnDestroy()
+        {
+            Hide();
+        }
+
+        private void Update()
+        {
+            if (!_hovered)
+                return;
+
+            if (_tooltip == null && Time.unscaledTime - _hoverStartedAt >= DelaySeconds)
+                Show();
+
+            if (_tooltip != null)
+                PositionTooltip();
+        }
+
+        private void Show()
+        {
+            var root = TooltipRoot();
+            if (root == null || _font == null || string.IsNullOrWhiteSpace(_text))
+                return;
+
+            _tooltip = new GameObject("ObjectSwitchTooltip", typeof(RectTransform), typeof(Image), typeof(CanvasGroup));
+            _tooltip.transform.SetParent(root, false);
+            _tooltip.transform.SetAsLastSibling();
+
+            var tooltipRt = _tooltip.GetComponent<RectTransform>();
+            tooltipRt.anchorMin = new Vector2(0.5f, 0.5f);
+            tooltipRt.anchorMax = new Vector2(0.5f, 0.5f);
+            tooltipRt.pivot = new Vector2(0.5f, 1f);
+            tooltipRt.anchoredPosition = Vector2.zero;
+
+            var image = _tooltip.GetComponent<Image>();
+            image.color = WithAlpha(VoidColor, 0.98f);
+            image.raycastTarget = false;
+
+            var group = _tooltip.GetComponent<CanvasGroup>();
+            group.interactable = false;
+            group.blocksRaycasts = false;
+
+            AddBorderSegment(_tooltip.transform, "BorderTop", WithAlpha(BorderColor, 0.95f),
+                new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(0.5f, 1f), new Vector2(0f, 1f));
+            AddBorderSegment(_tooltip.transform, "BorderBottom", WithAlpha(BorderColor, 0.95f),
+                new Vector2(0f, 0f), new Vector2(1f, 0f), new Vector2(0.5f, 0f), new Vector2(0f, 1f));
+            AddBorderSegment(_tooltip.transform, "BorderLeft", WithAlpha(BorderColor, 0.95f),
+                new Vector2(0f, 0f), new Vector2(0f, 1f), new Vector2(0f, 0.5f), new Vector2(1f, 0f));
+            AddBorderSegment(_tooltip.transform, "BorderRight", WithAlpha(BorderColor, 0.95f),
+                new Vector2(1f, 0f), new Vector2(1f, 1f), new Vector2(1f, 0.5f), new Vector2(1f, 0f));
+
+            var labelGo = new GameObject("Label", typeof(RectTransform), typeof(TextMeshProUGUI));
+            labelGo.transform.SetParent(_tooltip.transform, false);
+            var labelRt = labelGo.GetComponent<RectTransform>();
+            labelRt.anchorMin = Vector2.zero;
+            labelRt.anchorMax = Vector2.one;
+            labelRt.offsetMin = new Vector2(7f, 2f);
+            labelRt.offsetMax = new Vector2(-7f, -2f);
+
+            var label = labelGo.GetComponent<TextMeshProUGUI>();
+            label.text = _text;
+            label.font = _font;
+            label.fontSize = 11f;
+            label.color = PrimaryTextColor;
+            label.alignment = TextAlignmentOptions.Center;
+            label.enableWordWrapping = false;
+            label.overflowMode = TextOverflowModes.Ellipsis;
+            label.raycastTarget = false;
+
+            var preferred = label.GetPreferredValues(_text, MaxTooltipWidth, TooltipHeight);
+            tooltipRt.sizeDelta = new Vector2(Mathf.Clamp(preferred.x + 16f, 38f, MaxTooltipWidth), TooltipHeight);
+            PositionTooltip();
+        }
+
+        private void Hide()
+        {
+            if (_tooltip == null)
+                return;
+
+            Destroy(_tooltip);
+            _tooltip = null;
+        }
+
+        private RectTransform TooltipRoot()
+        {
+            if (_overlayRoot != null)
+                return _overlayRoot;
+
+            var canvas = GetComponentInParent<Canvas>();
+            return canvas != null ? canvas.GetComponent<RectTransform>() : null;
+        }
+
+        private void PositionTooltip()
+        {
+            var root = TooltipRoot();
+            var tooltipRt = _tooltip != null ? _tooltip.GetComponent<RectTransform>() : null;
+            var sourceRt = transform as RectTransform;
+            if (root == null || tooltipRt == null || sourceRt == null)
+                return;
+
+            var camera = GetPanelEventCamera(root);
+            var corners = new Vector3[4];
+            sourceRt.GetWorldCorners(corners);
+            var bottomCenter = (corners[0] + corners[3]) * 0.5f;
+            var screenPoint = RectTransformUtility.WorldToScreenPoint(camera, bottomCenter);
+            screenPoint.y -= GapBelowButton;
+
+            if (!RectTransformUtility.ScreenPointToLocalPointInRectangle(root, screenPoint, camera, out var localPoint))
+                return;
+
+            var rootRect = root.rect;
+            var tooltipSize = tooltipRt.sizeDelta;
+            var minX = rootRect.xMin + tooltipSize.x * 0.5f + ScreenPadding;
+            var maxX = rootRect.xMax - tooltipSize.x * 0.5f - ScreenPadding;
+            var minY = rootRect.yMin + tooltipSize.y + ScreenPadding;
+            var maxY = rootRect.yMax - ScreenPadding;
+
+            localPoint.x = minX <= maxX ? Mathf.Clamp(localPoint.x, minX, maxX) : rootRect.center.x;
+            localPoint.y = minY <= maxY ? Mathf.Clamp(localPoint.y, minY, maxY) : rootRect.center.y;
+
+            tooltipRt.anchoredPosition = localPoint;
+            _tooltip.transform.SetAsLastSibling();
         }
     }
 
@@ -629,6 +1098,7 @@ public class LogisticsUI : MonoBehaviour
         if (!_built || !isActiveAndEnabled) return;
         ConsumeEscapeIfPopupOpen();
         TrySyncFromWindow(force: false);
+        RefreshOpenRouteEditorOnTimeAdvance();
         UpdateLauncherVisibility();
     }
 
@@ -710,6 +1180,8 @@ public class LogisticsUI : MonoBehaviour
     {
         if (_popupRoot != null)
             _popupRoot.SetActive(false);
+        ClearActiveRouteEditor();
+        HidePopupRouteSubheader();
         RegisterPopupOpen(false);
         _popupPinnedData = null;
         _popupPinnedObjectInfo = null;
@@ -810,7 +1282,46 @@ public class LogisticsUI : MonoBehaviour
         titleElement.flexibleHeight = 0f;
         titleElement.flexibleWidth = 1f;
 
+        var switchRow = new GameObject("BodySwitchRow", typeof(RectTransform), typeof(HorizontalLayoutGroup), typeof(LayoutElement));
+        switchRow.transform.SetParent(header.transform, false);
+        _popupBodySwitchRow = switchRow.GetComponent<RectTransform>();
+        var switchLayout = switchRow.GetComponent<HorizontalLayoutGroup>();
+        switchLayout.padding = new RectOffset(0, 2, 0, 0);
+        switchLayout.spacing = 3f;
+        switchLayout.childControlWidth = true;
+        switchLayout.childControlHeight = true;
+        switchLayout.childForceExpandWidth = false;
+        switchLayout.childForceExpandHeight = false;
+        switchLayout.childAlignment = TextAnchor.MiddleRight;
+        var switchElement = switchRow.GetComponent<LayoutElement>();
+        switchElement.minHeight = 24f;
+        switchElement.preferredHeight = 24f;
+        switchElement.minWidth = 0f;
+        switchElement.preferredWidth = 0f;
+        switchElement.flexibleWidth = 0f;
+        switchElement.flexibleHeight = 0f;
+
         AddSmallButton(header.transform, "X", _runtimeStyle.RemoveButtonColor, () => ClosePopup(), 28f);
+
+        var routeSubheader = new GameObject("RouteSubheader", typeof(RectTransform), typeof(Image), typeof(HorizontalLayoutGroup), typeof(LayoutElement));
+        routeSubheader.transform.SetParent(panelGo.transform, false);
+        routeSubheader.SetActive(false);
+        _popupRouteSubheader = routeSubheader.GetComponent<RectTransform>();
+        var routeSubheaderImage = routeSubheader.GetComponent<Image>();
+        routeSubheaderImage.color = RouteSubheaderBarColor;
+        routeSubheaderImage.raycastTarget = true;
+        var routeSubheaderElement = routeSubheader.GetComponent<LayoutElement>();
+        routeSubheaderElement.minHeight = 30f;
+        routeSubheaderElement.preferredHeight = 30f;
+        routeSubheaderElement.flexibleHeight = 0f;
+        var routeSubheaderLayout = routeSubheader.GetComponent<HorizontalLayoutGroup>();
+        routeSubheaderLayout.padding = new RectOffset(10, 6, 3, 3);
+        routeSubheaderLayout.spacing = 8f;
+        routeSubheaderLayout.childControlWidth = true;
+        routeSubheaderLayout.childControlHeight = true;
+        routeSubheaderLayout.childForceExpandWidth = false;
+        routeSubheaderLayout.childForceExpandHeight = false;
+        routeSubheaderLayout.childAlignment = TextAnchor.MiddleCenter;
 
         var scrollGo = new GameObject("BodyScroll", typeof(RectTransform), typeof(Image), typeof(ScrollRect), typeof(LayoutElement));
         scrollGo.transform.SetParent(panelGo.transform, false);
@@ -826,7 +1337,9 @@ public class LogisticsUI : MonoBehaviour
         viewportRt.anchorMax = Vector2.one;
         viewportRt.offsetMin = Vector2.zero;
         viewportRt.offsetMax = new Vector2(-10f, 0f);
-        viewportGo.GetComponent<Image>().color = new Color(0f, 0f, 0f, 0.01f);
+        var viewportImage = viewportGo.GetComponent<Image>();
+        viewportImage.color = new Color(0f, 0f, 0f, 0.01f);
+        viewportImage.raycastTarget = false;
         viewportGo.GetComponent<Mask>().showMaskGraphic = false;
 
         var scrollbar = BuildPopupScrollbar(scrollGo.transform);
@@ -860,6 +1373,7 @@ public class LogisticsUI : MonoBehaviour
         scroll.verticalScrollbar = scrollbar;
         scroll.verticalScrollbarVisibility = ScrollRect.ScrollbarVisibility.Permanent;
         scroll.verticalScrollbarSpacing = -2f;
+        _popupScroll = scroll;
         scrollGo.AddComponent<SmoothPopupScroll>().Attach(scroll, _font);
     }
 
@@ -1203,11 +1717,370 @@ public class LogisticsUI : MonoBehaviour
         SetObjectIcon(_popupTitleIcon, _currentObjectInfo);
         if (_popupTitle != null)
             _popupTitle.text = $"{CompactObjectName(_currentObjectInfo)} Logistics";
-        BuildRoutesSection();
+        RebuildBodySwitchButtons();
+        if (TryGetActiveRouteEditor(out var activeRoute))
+            ShowRouteEditor(_routesSection, activeRoute);
+        else
+            BuildRoutesSection();
         if (_parentRt != null)
             LayoutRebuilder.ForceRebuildLayoutImmediate(_parentRt);
         if (_popupPanelRt != null)
             LayoutRebuilder.ForceRebuildLayoutImmediate(_popupPanelRt);
+    }
+
+    private bool TryGetActiveRouteEditor(out Data.LogisticsRouteRecord route)
+    {
+        route = null;
+        if (_activeRouteEditorRouteId <= 0 || _currentObjectInfo == null)
+            return false;
+
+        var data = Data.LogisticsNetwork.Get(_currentObjectInfo);
+        route = data?.routes?.FirstOrDefault(candidate => candidate != null
+            && candidate.routeId == _activeRouteEditorRouteId);
+        if (route != null)
+            return true;
+
+        ClearActiveRouteEditor();
+        return false;
+    }
+
+    private void ClearActiveRouteEditor()
+    {
+        _activeRouteEditorRouteId = -1;
+        SetRouteEditorMainPageVisible(false);
+    }
+
+    private void SetRouteEditorMainPageVisible(bool visible)
+    {
+        _routeEditorMainPageVisible = visible;
+        if (visible)
+        {
+            var currentTime = CurrentGameTimeOrMinValue();
+            if (currentTime != DateTime.MinValue)
+                _lastRouteEditorRefreshTime = currentTime;
+        }
+        else
+        {
+            _lastRouteEditorRefreshTime = DateTime.MinValue;
+            _nextRouteEditorLiveRefreshAt = 0f;
+        }
+    }
+
+    private void RefreshOpenRouteEditorOnTimeAdvance()
+    {
+        if (!_popupBuilt
+            || _popupRoot == null
+            || !_popupRoot.activeSelf
+            || !_routeEditorMainPageVisible
+            || _routesSection == null
+            || _activeRouteEditorRouteId <= 0)
+            return;
+
+        var currentTime = CurrentGameTimeOrMinValue();
+        if (currentTime == DateTime.MinValue)
+            return;
+
+        if (_lastRouteEditorRefreshTime == DateTime.MinValue)
+        {
+            _lastRouteEditorRefreshTime = currentTime;
+            return;
+        }
+
+        if (currentTime == _lastRouteEditorRefreshTime || Time.unscaledTime < _nextRouteEditorLiveRefreshAt)
+            return;
+
+        if (!TryGetActiveRouteEditor(out var route))
+            return;
+
+        var scrollPosition = _popupScroll != null ? _popupScroll.verticalNormalizedPosition : 1f;
+        _lastRouteEditorRefreshTime = currentTime;
+        _nextRouteEditorLiveRefreshAt = Time.unscaledTime + RouteEditorLiveRefreshIntervalSeconds;
+        ShowRouteEditor(_routesSection, route);
+        RestorePopupScrollPosition(scrollPosition);
+    }
+
+    private static DateTime CurrentGameTimeOrMinValue()
+    {
+        return MonoBehaviourSingleton<TimeController>.Instance?.CurrentTime ?? DateTime.MinValue;
+    }
+
+    private void RestorePopupScrollPosition(float scrollPosition)
+    {
+        if (_popupScroll == null)
+            return;
+
+        Canvas.ForceUpdateCanvases();
+        _popupScroll.verticalNormalizedPosition = Mathf.Clamp01(scrollPosition);
+        _popupScroll.velocity = Vector2.zero;
+    }
+
+    private void ShowPopupRouteSubheader(LogisticsSection section, Data.LogisticsRouteRecord route)
+    {
+        if (_popupRouteSubheader == null || route == null)
+            return;
+
+        ClearChildren(_popupRouteSubheader);
+        _popupRouteSubheader.gameObject.SetActive(true);
+
+        AddRouteStatusDot(_popupRouteSubheader, route, 14f);
+        AddRouteHeaderRow(_popupRouteSubheader, route, true);
+
+        AddSmallButton(_popupRouteSubheader, "\u2190 Back", _runtimeStyle.BackButtonColor, () =>
+        {
+            ClearActiveRouteEditor();
+            HidePopupRouteSubheader();
+            BuildRoutesSection();
+            RebuildSectionLayout(section);
+        }, 70f);
+
+        AddSmallButton(_popupRouteSubheader, route.isActive ? "Pause Route" : "Resume Route",
+            route.isActive ? _runtimeStyle.ToggleOffColor : _runtimeStyle.RemoveButtonColor, () =>
+        {
+            SetRouteActive(route, !route.isActive);
+            ShowRouteEditor(section, route);
+        }, 104f);
+    }
+
+    private void HidePopupRouteSubheader()
+    {
+        if (_popupRouteSubheader == null)
+            return;
+
+        ClearChildren(_popupRouteSubheader);
+        _popupRouteSubheader.gameObject.SetActive(false);
+    }
+
+    private void RebuildBodySwitchButtons()
+    {
+        if (_popupBodySwitchRow == null)
+            return;
+
+        ClearChildren(_popupBodySwitchRow);
+        var targets = BuildBodySwitchTargets(_currentObjectInfo);
+        var player = MonoBehaviourSingleton<GameManager>.Instance?.Player;
+        var visibleTargets = targets
+            .Where(target => CanOpenLogisticsFor(target, player))
+            .ToList();
+
+        foreach (var target in visibleTargets)
+        {
+            var captured = target;
+            AddObjectSwitchButton(_popupBodySwitchRow, captured, () => SwapPopupToObject(captured));
+        }
+
+        var width = visibleTargets.Count <= 0 ? 0f : visibleTargets.Count * 24f + Math.Max(0, visibleTargets.Count - 1) * 3f + 2f;
+        var layout = _popupBodySwitchRow.GetComponent<LayoutElement>();
+        if (layout != null)
+        {
+            layout.minWidth = width;
+            layout.preferredWidth = width;
+        }
+        _popupBodySwitchRow.gameObject.SetActive(visibleTargets.Count > 0);
+    }
+
+    private void SwapPopupToObject(ObjectInfo target)
+    {
+        if (target == null || SameObjectInfo(target, _currentObjectInfo))
+            return;
+
+        var player = MonoBehaviourSingleton<GameManager>.Instance?.Player;
+        var targetData = target.GetObjectInfoData(player);
+        if (targetData == null || targetData.company != player)
+            return;
+
+        BuildPopupShell();
+        if (_popupRoot == null)
+            return;
+
+        _currentData = targetData;
+        _currentObjectInfo = target;
+        ClearActiveRouteEditor();
+        _popupPinnedData = targetData;
+        _popupPinnedObjectInfo = target;
+        _popupRoot.SetActive(true);
+        _popupRoot.transform.SetAsLastSibling();
+        RegisterPopupOpen(true);
+        EnsurePopupSections();
+        if (_popupScroll != null)
+            _popupScroll.verticalNormalizedPosition = 1f;
+        RefreshAllSections();
+    }
+
+    private static bool CanOpenLogisticsFor(ObjectInfo target, Company player)
+    {
+        if (target == null || player == null)
+            return false;
+        var data = target.GetObjectInfoData(player);
+        return data != null && data.company == player;
+    }
+
+    private List<ObjectInfo> BuildBodySwitchTargets(ObjectInfo current)
+    {
+        var result = new List<ObjectInfo>();
+        var seen = new HashSet<int>();
+        var objects = MonoBehaviourSingleton<ObjectInfoManager>.Instance?.allObjectInfos?
+            .Where(oi => oi != null)
+            .ToList() ?? new List<ObjectInfo>();
+        var objectOrder = BuildObjectOrderMap(objects);
+
+        void AddTarget(ObjectInfo target)
+        {
+            if (target == null
+                || target.objectTypes == global::Data.EObjectTypes.SolarSystem
+                || IsExcludedBodySwitchTarget(target)
+                || SameObjectInfo(target, current)
+                || !seen.Add(target.id))
+                return;
+            result.Add(target);
+        }
+
+        void AddBodyAndOrbit(ObjectInfo body)
+        {
+            if (body == null
+                || body.objectTypes == global::Data.EObjectTypes.SolarSystem
+                || IsExcludedBodySwitchTarget(body))
+                return;
+            AddTarget(body);
+            AddTarget(body.LowOrbitCustom?.GetObjectInfo());
+        }
+
+        var body = SwitchBodyForObject(current);
+        if (IsSolarSwitchContext(current, body))
+        {
+            foreach (var target in objects
+                         .Where(candidate => IsSolarPrimaryClusterObject(candidate, body))
+                         .OrderBy(SwitchSortDistance)
+                         .ThenBy(candidate => ObjectOrder(candidate, objectOrder)))
+                AddTarget(target);
+            return result;
+        }
+
+        AddBodyAndOrbit(body?.parentObjectInfo);
+        AddBodyAndOrbit(body);
+
+        var children = objects
+            .Where(candidate => IsDirectChildBody(candidate, body) && !IsExcludedBodySwitchTarget(candidate))
+            .OrderBy(SwitchSortDistance)
+            .ThenBy(candidate => ObjectOrder(candidate, objectOrder))
+            .ToList();
+        var suppressChildOrbits = children.Count >= BodySwitcherCrowdedChildThreshold;
+        foreach (var child in children)
+        {
+            if (suppressChildOrbits)
+                AddTarget(child);
+            else
+                AddBodyAndOrbit(child);
+        }
+
+        return result;
+    }
+
+    private static Dictionary<int, int> BuildObjectOrderMap(List<ObjectInfo> objects)
+    {
+        var result = new Dictionary<int, int>();
+        if (objects == null)
+            return result;
+        for (var i = 0; i < objects.Count; i++)
+        {
+            var oi = objects[i];
+            if (oi != null && !result.ContainsKey(oi.id))
+                result[oi.id] = i;
+        }
+        return result;
+    }
+
+    private static int ObjectOrder(ObjectInfo oi, Dictionary<int, int> order)
+    {
+        if (oi != null && order != null && order.TryGetValue(oi.id, out var value))
+            return value;
+        return int.MaxValue;
+    }
+
+    private static bool IsSolarSwitchContext(ObjectInfo current, ObjectInfo body)
+    {
+        return IsSolarRootObject(current) || IsSolarRootObject(body);
+    }
+
+    private static bool IsSolarRootObject(ObjectInfo oi)
+    {
+        if (oi == null)
+            return false;
+        if (oi.objectTypes == global::Data.EObjectTypes.SolarSystem
+            || oi.objectTypes == global::Data.EObjectTypes.SolarOrbit)
+            return true;
+        return oi.parentObjectInfo == null && LooksLikeSolarName(oi);
+    }
+
+    private static bool LooksLikeSolarName(ObjectInfo oi)
+    {
+        var name = oi?.ObjectName ?? "";
+        return name.IndexOf("sun", System.StringComparison.OrdinalIgnoreCase) >= 0
+            || name.IndexOf("solar", System.StringComparison.OrdinalIgnoreCase) >= 0;
+    }
+
+    private static bool IsSolarPrimaryClusterObject(ObjectInfo candidate, ObjectInfo solarRoot)
+    {
+        if (candidate == null
+            || candidate.objectTypes == global::Data.EObjectTypes.SolarSystem
+            || IsExcludedBodySwitchTarget(candidate))
+            return false;
+        if (candidate.objectTypes == global::Data.EObjectTypes.Orbit)
+            return false;
+        if (candidate.objectTypes == global::Data.EObjectTypes.SolarOrbit)
+            return true;
+        if (IsSolarRootObject(candidate))
+            return false;
+        return IsSolarRootObject(candidate.parentObjectInfo)
+            || (solarRoot != null && SameObjectInfo(candidate.parentObjectInfo, solarRoot));
+    }
+
+    private static double SwitchSortDistance(ObjectInfo oi)
+    {
+        if (oi == null)
+            return double.MaxValue;
+        if (oi.objectTypes == global::Data.EObjectTypes.SolarOrbit)
+            return 0;
+        if (oi.DistanceToCentralObjectAu > 0.000001)
+            return oi.DistanceToCentralObjectAu;
+        if (oi.DistanceToSunInAU > 0.000001)
+            return oi.DistanceToSunInAU;
+        return double.MaxValue;
+    }
+
+    private static ObjectInfo SwitchBodyForObject(ObjectInfo oi)
+    {
+        if (oi == null)
+            return null;
+        return (oi.objectTypes == global::Data.EObjectTypes.Orbit
+                || oi.objectTypes == global::Data.EObjectTypes.SolarOrbit)
+               && oi.parentObjectInfo != null
+            ? oi.parentObjectInfo
+            : oi;
+    }
+
+    private static bool IsExcludedBodySwitchTarget(ObjectInfo oi)
+    {
+        if (oi == null || oi.IsInGameDestroy || IsAsteroidOrComet(oi))
+            return true;
+
+        return oi.objectTypes == global::Data.EObjectTypes.Orbit
+            && IsAsteroidOrComet(oi.parentObjectInfo);
+    }
+
+    private static bool IsAsteroidOrComet(ObjectInfo oi)
+    {
+        return oi != null
+            && (oi.objectTypes == global::Data.EObjectTypes.Asteroid
+                || oi.objectTypes == global::Data.EObjectTypes.Comet);
+    }
+
+    private static bool IsDirectChildBody(ObjectInfo candidate, ObjectInfo body)
+    {
+        return candidate != null
+            && body != null
+            && candidate.objectTypes != global::Data.EObjectTypes.Orbit
+            && candidate.objectTypes != global::Data.EObjectTypes.SolarSystem
+            && SameObjectInfo(candidate.parentObjectInfo, body);
     }
 
     private void RebuildSectionLayout(LogisticsSection section)
@@ -1224,6 +2097,8 @@ public class LogisticsUI : MonoBehaviour
 
     private void BuildRoutesSection()
     {
+        SetRouteEditorMainPageVisible(false);
+        HidePopupRouteSubheader();
         _routesSection.ClearContent();
         if (_currentObjectInfo == null) return;
 
@@ -1260,7 +2135,7 @@ public class LogisticsUI : MonoBehaviour
             AddRouteStatusDot(row.transform, route);
             AddObjectIcon(row.transform, destinationOi, 22f);
             var routeState = route.isActive ? "" : "  paused";
-            var label = MakeTMP(row.transform, $"{destination}{routeState}", _runtimeStyle.RowFontSize, _runtimeStyle.RowTextColor);
+            var label = MakeTMP(row.transform, $"{destination}{routeState}", _runtimeStyle.RowFontSize, EngineAccentColor);
             label.enableWordWrapping = true;
             label.overflowMode = TextOverflowModes.Overflow;
             var le = label.gameObject.AddComponent<LayoutElement>();
@@ -1320,9 +2195,7 @@ public class LogisticsUI : MonoBehaviour
         if (row == null || route == null)
             return;
 
-        var button = row.AddComponent<Button>();
-        button.transition = Selectable.Transition.None;
-        button.navigation = new Navigation { mode = Navigation.Mode.None };
+        var button = MakeRowButton(row);
         button.onClick.AddListener(() =>
         {
             route.uiCollapsed = !route.uiCollapsed;
@@ -1338,6 +2211,7 @@ public class LogisticsUI : MonoBehaviour
         group.transform.SetParent(parent, false);
         var image = group.GetComponent<Image>();
         image.color = WithAlpha(VoidColor, 0.96f);
+        image.raycastTarget = false;
         var layout = group.GetComponent<LayoutElement>();
         layout.minHeight = 1f;
         layout.flexibleWidth = 1f;
@@ -1385,7 +2259,9 @@ public class LogisticsUI : MonoBehaviour
         var group = new GameObject("RouteDetails", typeof(RectTransform), typeof(VerticalLayoutGroup), typeof(Image), typeof(LayoutElement),
             typeof(ContentSizeFitter));
         group.transform.SetParent(shell.transform, false);
-        group.GetComponent<Image>().color = WithAlpha(VoidColor, 0.98f);
+        var image = group.GetComponent<Image>();
+        image.color = WithAlpha(VoidColor, 0.98f);
+        image.raycastTarget = false;
 
         var layout = group.GetComponent<LayoutElement>();
         layout.minHeight = 1f;
@@ -1425,11 +2301,12 @@ public class LogisticsUI : MonoBehaviour
             hlg.padding.right, hlg.padding.top, hlg.padding.bottom);
     }
 
-    private void AddRouteStatusDot(Transform parent, Data.LogisticsRouteRecord route)
+    private void AddRouteStatusDot(Transform parent, Data.LogisticsRouteRecord route, float fontSize = 13f)
     {
-        var dot = MakeTMP(parent, "\u25CF", 13f, RouteOverviewStatusColor(route));
+        var dot = MakeTMP(parent, "\u25CF", fontSize, RouteOverviewStatusColor(route));
         dot.alignment = TextAlignmentOptions.Midline;
         dot.enableWordWrapping = false;
+        dot.raycastTarget = false;
         var layout = dot.gameObject.AddComponent<LayoutElement>();
         layout.minWidth = 14f;
         layout.preferredWidth = 14f;
@@ -1630,8 +2507,9 @@ public class LogisticsUI : MonoBehaviour
         }
     }
 
-    private GameObject AddRouteAssetTableRow(Transform parent, string icon, string assetName, int total, int ready, Color textColor,
-        Color? rowColor = null, float height = 24f)
+    private GameObject AddRouteAssetTableRow(Transform parent, string icon, string assetName, int total, int ready,
+        Color textColor, Color? rowColor = null, float height = 24f,
+        Action<Transform> addInlineControls = null)
     {
         var row = MakeHLRow(parent, height, 4);
         row.GetComponent<Image>().color = rowColor ?? RowBgMutedColor;
@@ -1640,10 +2518,41 @@ public class LogisticsUI : MonoBehaviour
         AddTableCell(row.transform, assetName, RouteAssetNameColumnWidth, 12.5f, textColor, TextAlignmentOptions.MidlineLeft);
         AddTableCell(row.transform, ready.ToString(), RouteAssetNumberColumnWidth, 12.5f, textColor, TextAlignmentOptions.MidlineRight);
         AddTableCell(row.transform, total.ToString(), RouteAssetNumberColumnWidth, 12.5f, textColor, TextAlignmentOptions.MidlineRight);
+        if (addInlineControls != null)
+        {
+            AddSpacer(row.transform, FlightPlanModeColumnGap);
+            AddTableCell(row.transform, "", 0f, 12.5f, textColor, TextAlignmentOptions.MidlineLeft, true);
+            var controlsRow = MakeHLContainer(row.transform, 24f, FlightPlanModeButtonGap);
+            var controlsHlg = controlsRow.GetComponent<HorizontalLayoutGroup>();
+            if (controlsHlg != null)
+                controlsHlg.childAlignment = TextAnchor.MiddleRight;
+            var controlsLayout = controlsRow.GetComponent<LayoutElement>();
+            if (controlsLayout != null)
+            {
+                controlsLayout.minWidth = FlightPlanModeControlsWidth;
+                controlsLayout.preferredWidth = FlightPlanModeControlsWidth;
+                controlsLayout.flexibleWidth = 0f;
+            }
+            addInlineControls(controlsRow.transform);
+        }
         return row;
     }
 
-    private void AddRouteAssetTableHeader(Transform parent)
+    private GameObject AddRouteEmptyMessageRow(Transform parent, string message)
+    {
+        var row = MakeHLRow(parent, 28f, 0);
+        row.GetComponent<Image>().color = _runtimeStyle.RowBackgroundColor;
+        var layout = row.GetComponent<HorizontalLayoutGroup>();
+        if (layout != null)
+            layout.padding = IsRouteOverviewDetailParent(parent)
+                ? new RectOffset(Mathf.RoundToInt(RouteOverviewDetailContentInset), layout.padding.right,
+                    layout.padding.top, layout.padding.bottom)
+                : new RectOffset(8, 8, layout.padding.top, layout.padding.bottom);
+        AddTableCell(row.transform, message, 0f, 13f, PrimaryTextColor, TextAlignmentOptions.MidlineLeft, true);
+        return row;
+    }
+
+    private void AddRouteAssetTableHeader(Transform parent, bool includeFlightPlan = false)
     {
         var row = MakeHLRow(parent, 20f, 4);
         row.GetComponent<Image>().color = WithAlpha(BorderColor, 0.36f);
@@ -1652,19 +2561,42 @@ public class LogisticsUI : MonoBehaviour
         AddTableCell(row.transform, "Asset", RouteAssetNameColumnWidth, 10.5f, TertiaryTextColor, TextAlignmentOptions.MidlineLeft);
         AddTableCell(row.transform, "Ready", RouteAssetNumberColumnWidth, 10.5f, TertiaryTextColor, TextAlignmentOptions.MidlineRight);
         AddTableCell(row.transform, "Qty", RouteAssetNumberColumnWidth, 10.5f, TertiaryTextColor, TextAlignmentOptions.MidlineRight);
+        if (includeFlightPlan)
+        {
+            AddSpacer(row.transform, FlightPlanModeColumnGap);
+            AddTableCell(row.transform, "", 0f, 10.5f, TertiaryTextColor, TextAlignmentOptions.MidlineLeft, true);
+            var planHeaderRow = MakeHLContainer(row.transform, 20f, FlightPlanModeButtonGap);
+            var planHeaderHlg = planHeaderRow.GetComponent<HorizontalLayoutGroup>();
+            if (planHeaderHlg != null)
+                planHeaderHlg.childAlignment = TextAnchor.MiddleRight;
+            var planHeaderLayout = planHeaderRow.GetComponent<LayoutElement>();
+            if (planHeaderLayout != null)
+            {
+                planHeaderLayout.minWidth = FlightPlanModeControlsWidth;
+                planHeaderLayout.preferredWidth = FlightPlanModeControlsWidth;
+                planHeaderLayout.flexibleWidth = 0f;
+            }
+            AddTableCell(planHeaderRow.transform, "Plan", FlightPlanModeButtonGroupWidth, 10.5f, TertiaryTextColor,
+                TextAlignmentOptions.MidlineLeft);
+        }
     }
 
     private void ShowRouteDestinationPicker(LogisticsSection section)
     {
+        ClearActiveRouteEditor();
         section.ClearContent();
         AddBigButton(section.ContentArea, "\u2190 Back", _runtimeStyle.BackButtonColor, () =>
         {
+            ClearActiveRouteEditor();
             BuildRoutesSection();
             RebuildSectionLayout(section);
         });
 
+        var player = MonoBehaviourSingleton<GameManager>.Instance?.Player;
         var objects = MonoBehaviourSingleton<ObjectInfoManager>.Instance?.allObjectInfos
-            ?.Where(oi => oi != null && oi != _currentObjectInfo && oi.objectTypes != global::Data.EObjectTypes.SolarSystem)
+            ?.Where(oi => IsRouteDestinationCandidate(oi, _currentObjectInfo, player))
+            .GroupBy(oi => oi.id)
+            .Select(group => group.OrderBy(RouteDestinationCandidateRank).First())
             .OrderBy(oi => oi.ObjectName, System.StringComparer.OrdinalIgnoreCase)
             .ToList() ?? new List<ObjectInfo>();
 
@@ -1740,6 +2672,68 @@ public class LogisticsUI : MonoBehaviour
         return !string.IsNullOrWhiteSpace(value)
             && !string.IsNullOrWhiteSpace(search)
             && value.IndexOf(search.Trim(), System.StringComparison.OrdinalIgnoreCase) >= 0;
+    }
+
+    private static bool IsRouteDestinationCandidate(ObjectInfo destination, ObjectInfo current, Company player)
+    {
+        if (destination == null
+            || player == null
+            || SameObjectInfo(destination, current)
+            || destination.IsInGameDestroy
+            || destination.IsHideToDiscover
+            || !destination.IsDiscoveredForPlayerCache
+            || destination.IsUseInSpaceElevator
+            || destination.AsteroidFromPush
+            || destination.clickObjectInfo != null
+            || !IsRouteDestinationObjectType(destination))
+            return false;
+
+        var objectManager = MonoBehaviourSingleton<ObjectInfoManager>.Instance;
+        if (SameObjectInfo(destination, objectManager?.mainObjectInfoSun))
+            return false;
+
+        if (destination.objectTypes == global::Data.EObjectTypes.Orbit && destination.parentObjectInfo != null)
+        {
+            var parent = destination.parentObjectInfo;
+            if (parent.objectTypes == global::Data.EObjectTypes.Orbit
+                || IsAsteroidOrComet(parent)
+                || parent.AsteroidFromPush
+                || parent.IsUseInSpaceElevator)
+                return false;
+        }
+
+        return CanOpenLogisticsFor(destination, player);
+    }
+
+    private static bool IsRouteDestinationObjectType(ObjectInfo destination)
+    {
+        if (destination == null)
+            return false;
+
+        switch (destination.objectTypes)
+        {
+            case global::Data.EObjectTypes.Planet:
+            case global::Data.EObjectTypes.Moons:
+            case global::Data.EObjectTypes.DwarfPlanet:
+            case global::Data.EObjectTypes.Protoplanet:
+            case global::Data.EObjectTypes.Asteroid:
+            case global::Data.EObjectTypes.Comet:
+            case global::Data.EObjectTypes.Orbit:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    private static int RouteDestinationCandidateRank(ObjectInfo destination)
+    {
+        if (destination == null)
+            return int.MaxValue;
+        if (destination.InterstellarConstructionFacility)
+            return 0;
+        if (destination.objectTypes == global::Data.EObjectTypes.Orbit)
+            return 20;
+        return 10;
     }
 
     private TMP_InputField AddSearchField(Transform parent, string placeholderText, System.Action<string> onChanged)
@@ -1823,8 +2817,7 @@ public class LogisticsUI : MonoBehaviour
         var labelLayout = label.gameObject.AddComponent<LayoutElement>();
         labelLayout.flexibleWidth = 1f;
         labelLayout.preferredWidth = 0f;
-        var btn = row.AddComponent<Button>();
-        btn.navigation = new Navigation { mode = Navigation.Mode.None };
+        var btn = MakeRowButton(row);
         btn.onClick.AddListener(() =>
         {
             var route = Data.LogisticsNetwork.AddRoute(_currentObjectInfo, captured);
@@ -1832,20 +2825,30 @@ public class LogisticsUI : MonoBehaviour
         });
     }
 
-    private void AddRouteHeaderRow(Transform parent, Data.LogisticsRouteRecord route)
+    private void AddRouteHeaderRow(Transform parent, Data.LogisticsRouteRecord route, bool flexible = false)
     {
         var row = MakeHLContainer(parent, 26f, 4f);
+        if (flexible)
+        {
+            var rowLayout = row.GetComponent<LayoutElement>();
+            rowLayout.flexibleWidth = 1f;
+            rowLayout.preferredWidth = 0f;
+        }
         var source = ResolveObjectInfo(route?.sourceObjectId ?? -1) ?? _currentObjectInfo;
         var destination = ResolveObjectInfo(route?.destinationObjectId ?? -1);
+        var nameMaxWidth = flexible ? RouteStickyHeaderNameMaxWidth : RouteHeaderNameMaxWidth;
 
         AddObjectIcon(row.transform, source, 22f);
-        AddHeaderLabel(row.transform, CompactObjectName(source, ObjectName(route?.sourceObjectId ?? -1)), EngineAccentColor);
-        AddHeaderLabel(row.transform, "\u2192", TertiaryTextColor, 18f);
+        AddHeaderLabel(row.transform, CompactObjectName(source, ObjectName(route?.sourceObjectId ?? -1)), EngineAccentColor,
+            0f, nameMaxWidth);
+        AddHeaderLabel(row.transform, "\u2192", TertiaryTextColor, RouteHeaderArrowWidth);
         AddObjectIcon(row.transform, destination, 22f);
-        AddHeaderLabel(row.transform, CompactObjectName(destination, ObjectName(route?.destinationObjectId ?? -1)), EngineAccentColor);
+        AddHeaderLabel(row.transform, CompactObjectName(destination, ObjectName(route?.destinationObjectId ?? -1)), EngineAccentColor,
+            0f, nameMaxWidth);
     }
 
-    private TextMeshProUGUI AddHeaderLabel(Transform parent, string text, Color color, float width = 0f)
+    private TextMeshProUGUI AddHeaderLabel(Transform parent, string text, Color color, float width = 0f,
+        float maxWidth = RouteHeaderNameMaxWidth)
     {
         var label = MakeTMP(parent, text ?? "?", 14f, color);
         label.alignment = width > 0f ? TextAlignmentOptions.Midline : TextAlignmentOptions.MidlineLeft;
@@ -1855,10 +2858,10 @@ public class LogisticsUI : MonoBehaviour
         layout.minHeight = 22f;
         layout.preferredHeight = 22f;
         layout.flexibleHeight = 0f;
-        var measured = label.GetPreferredValues(text ?? "?", RouteHeaderNameMaxWidth, 22f).x;
+        var measured = label.GetPreferredValues(text ?? "?", maxWidth, 22f).x;
         var preferredWidth = width > 0f
             ? width
-            : Mathf.Clamp(measured + 4f, 26f, RouteHeaderNameMaxWidth);
+            : Mathf.Clamp(measured + 4f, 26f, maxWidth);
         layout.minWidth = preferredWidth;
         layout.preferredWidth = preferredWidth;
         layout.flexibleWidth = 0f;
@@ -1917,16 +2920,16 @@ public class LogisticsUI : MonoBehaviour
         section.ClearContent();
         if (route == null)
         {
+            ClearActiveRouteEditor();
+            HidePopupRouteSubheader();
             BuildRoutesSection();
             RebuildSectionLayout(section);
             return;
         }
 
-        AddRouteEditorActionRow(section, route);
-        AddRouteHeaderRow(section.ContentArea, route);
-        AddRouteHealthRow(section, route);
-
-        AddRouteResourceIconRow(section, route);
+        _activeRouteEditorRouteId = route.routeId;
+        SetRouteEditorMainPageVisible(true);
+        ShowPopupRouteSubheader(section, route);
 
         AddBigButton(section.ContentArea, "+ Add Route Resource", _runtimeStyle.ConfirmButtonColor, () =>
         {
@@ -1936,24 +2939,24 @@ public class LogisticsUI : MonoBehaviour
         var rules = route.resources ?? new List<Data.LogisticsRouteResourceRule>();
         if (rules.Count == 0)
         {
-            section.AddTextRow("No resources on this route.", _font, 13f, DisabledTextColor);
+            AddRouteEmptyMessageRow(section.ContentArea, "No resources on this route.");
         }
         else
         {
             AddRouteResourceTableHeader(section);
-            foreach (var item in rules
-                         .Select((rule, index) => new { Rule = rule, Index = index })
-                         .OrderBy(x => ResourceSortName(x.Rule?.ResourceDefinition, x.Rule?.resourceDef?.id), System.StringComparer.OrdinalIgnoreCase))
-            {
-                var rule = item.Rule;
-                if (rule == null)
-                    continue;
-                var idx = item.Index;
-                var rd = rule.ResourceDefinition ?? ResolveResource(rule.resourceDef?.id);
-                rule.ResourceDefinition = rd;
-
-                AddRouteResourceTableRow(section, route, rule, idx, rd);
-            }
+            var resourceRows = rules
+                .Select((rule, index) => new RouteResourceTableItem { Rule = rule, Index = index })
+                .Where(item => item.Rule != null)
+                .Select(item =>
+                {
+                    var rd = item.Rule.ResourceDefinition ?? ResolveResource(item.Rule.resourceDef?.id);
+                    item.Rule.ResourceDefinition = rd;
+                    item.Resource = rd;
+                    return item;
+                })
+                .OrderBy(item => ResourceSortName(item.Resource, item.Rule.resourceDef?.id), System.StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            AddVirtualRouteResourceTableRows(section, route, resourceRows);
         }
 
         AddBigButton(section.ContentArea, "+ Assign Spacecraft", _runtimeStyle.ActionButtonColor, () =>
@@ -1969,28 +2972,9 @@ public class LogisticsUI : MonoBehaviour
         });
 
         BuildRouteLaunchVehicleRows(section, route);
+        AddRouteFacilityLaunchOptionRows(section, route);
         AddRouteGhostFlightsSection(section, route);
         RebuildSectionLayout(section);
-    }
-
-    private void AddRouteEditorActionRow(LogisticsSection section, Data.LogisticsRouteRecord route)
-    {
-        var row = MakeHLContainer(section.ContentArea, 24f, 8f);
-        row.name = "RouteEditorActionRow";
-
-        AddInlineTextButton(row.transform, "\u2190 Back", SecondaryTextColor, () =>
-        {
-            BuildRoutesSection();
-            RebuildSectionLayout(section);
-        });
-
-        AddFlexibleSpacer(row.transform);
-
-        AddInlineTextButton(row.transform, route.isActive ? "Pause Route" : "Resume Route", SecondaryTextColor, () =>
-        {
-            SetRouteActive(route, !route.isActive);
-            ShowRouteEditor(section, route);
-        }, TextAlignmentOptions.MidlineRight);
     }
 
     private void AddRouteResourceTableHeader(LogisticsSection section)
@@ -2006,10 +2990,34 @@ public class LogisticsUI : MonoBehaviour
         AddTableCell(row.transform, "", 24f, 11f, TertiaryTextColor);
     }
 
+    private void AddVirtualRouteResourceTableRows(LogisticsSection section, Data.LogisticsRouteRecord route,
+        List<RouteResourceTableItem> rows)
+    {
+        if (section == null || rows == null || rows.Count == 0)
+            return;
+
+        AddVirtualFixedList(section.ContentArea, "RouteResourceVirtualList", rows.Count, RouteResourceRowHeight,
+            (parent, height) => MakeVirtualHLRow(parent, height, 4f),
+            (row, index) =>
+            {
+                var item = rows[index];
+                PopulateRouteResourceTableRow(row, section, route, item.Rule, item.Index, item.Resource);
+            });
+    }
+
     private void AddRouteResourceTableRow(LogisticsSection section, Data.LogisticsRouteRecord route,
         Data.LogisticsRouteResourceRule rule, int idx, ResourceDefinition rd)
     {
-        var row = MakeHLRow(section.ContentArea, 34f, 4);
+        var row = MakeHLRow(section.ContentArea, RouteResourceRowHeight, 4);
+        PopulateRouteResourceTableRow(row, section, route, rule, idx, rd);
+    }
+
+    private void PopulateRouteResourceTableRow(GameObject row, LogisticsSection section, Data.LogisticsRouteRecord route,
+        Data.LogisticsRouteResourceRule rule, int idx, ResourceDefinition rd)
+    {
+        if (row == null || rule == null)
+            return;
+
         row.GetComponent<Image>().color = rule.isActive ? _runtimeStyle.RowBackgroundColor : RowBgMutedColor;
 
         var textColor = rule.isActive ? _runtimeStyle.RowTextColor : DisabledTextColor;
@@ -2022,14 +3030,12 @@ public class LogisticsUI : MonoBehaviour
 
         var status = RouteResourceStatusText(rule, route);
         var statusLabel = AddTableCell(row.transform, status, 0f, 12f, RouteResourceStatusColor(status, rule.isActive),
-            TextAlignmentOptions.MidlineLeft, true, true);
-        statusLabel.overflowMode = TextOverflowModes.Overflow;
+            TextAlignmentOptions.MidlineLeft, true, false);
+        statusLabel.overflowMode = TextOverflowModes.Ellipsis;
 
         if (rd != null)
         {
-            var editButton = row.AddComponent<Button>();
-            editButton.transition = Selectable.Transition.None;
-            editButton.navigation = new Navigation { mode = Navigation.Mode.None };
+            var editButton = MakeRowButton(row);
             editButton.onClick.AddListener(() => ShowRouteResourceInput(section, route, rd, idx));
         }
         MakeXButton(row.transform, () =>
@@ -2047,6 +3053,18 @@ public class LogisticsUI : MonoBehaviour
         if (cleaned.StartsWith("No idle logistics vessel", System.StringComparison.OrdinalIgnoreCase)
             || cleaned.StartsWith("No idle logistics vessels", System.StringComparison.OrdinalIgnoreCase))
             return "No idle vessels";
+        if (cleaned.StartsWith("Waiting for source surplus", System.StringComparison.OrdinalIgnoreCase))
+            return "Waiting for surplus";
+        if (cleaned.StartsWith("Waiting for full load", System.StringComparison.OrdinalIgnoreCase))
+            return "Waiting for full load";
+        if (cleaned.StartsWith("Waiting for convoy capacity", System.StringComparison.OrdinalIgnoreCase))
+            return "Waiting for capacity";
+        if (cleaned.StartsWith("No route convoy dispatched", System.StringComparison.OrdinalIgnoreCase))
+            return "No convoy dispatched";
+        if (cleaned.StartsWith("Could not commit route convoy", System.StringComparison.OrdinalIgnoreCase))
+            return "Convoy blocked";
+        if (cleaned.StartsWith("No reserved launch vehicle", System.StringComparison.OrdinalIgnoreCase))
+            return "No launch capacity";
         if (route == null)
             return cleaned;
 
@@ -2280,12 +3298,165 @@ public class LogisticsUI : MonoBehaviour
             return;
 
         route.isActive = active;
+        ClearRoutePlanningStatus(route);
+    }
+
+    private static void ClearRoutePlanningStatus(Data.LogisticsRouteRecord route)
+    {
+        if (route == null)
+            return;
+
         route.statusNote = null;
         foreach (var rule in route.resources ?? new List<Data.LogisticsRouteResourceRule>())
         {
             if (rule != null)
                 rule.statusNote = null;
         }
+    }
+
+    private void AddRouteShipGroupFlightPlanControls(Transform parent, Data.LogisticsRouteRecord route, string typeId,
+        LogisticsSection section)
+    {
+        if (parent == null || route == null || string.IsNullOrWhiteSpace(typeId))
+            return;
+
+        var type = RouteSpacecraftType(typeId);
+        var fastDisabled = type?.SolarSC == true;
+        var selectedMode = GetRouteShipTypeFlightPlanMode(route, typeId, fastDisabled);
+        AddFlightPlanModeButtons(parent, selectedMode, fastDisabled, mode =>
+        {
+            SetRouteShipTypeFlightPlanMode(route, typeId, fastDisabled, mode);
+            ClearRoutePlanningStatus(route);
+            LogisticsObserver.NormalizeGhostConvoys();
+            ShowRouteEditor(section, route);
+        });
+    }
+
+    private void AddRouteShipTypeFlightPlanRow(LogisticsSection section, Data.LogisticsRouteRecord route, string typeId,
+        int desiredCount)
+    {
+        if (section == null || route == null || string.IsNullOrWhiteSpace(typeId))
+            return;
+
+        var type = RouteSpacecraftType(typeId);
+        var fastDisabled = type?.SolarSC == true;
+        var row = MakeHLRow(section.ContentArea, 30f, 6);
+        row.GetComponent<Image>().color = RowBgMutedColor;
+        AddTableCell(row.transform, "Default plan", 0f, 12.5f, _runtimeStyle.RowTextColor,
+            TextAlignmentOptions.MidlineLeft, true);
+        AddFlightPlanModeButtons(row.transform, GetRouteShipTypeFlightPlanMode(route, typeId, fastDisabled),
+            fastDisabled, mode =>
+            {
+                SetRouteShipTypeFlightPlanMode(route, typeId, fastDisabled, mode);
+                ClearRoutePlanningStatus(route);
+                LogisticsObserver.NormalizeGhostConvoys();
+                ShowRouteShipCountEditor(section, route, typeId, desiredCount);
+            });
+    }
+
+    private static Data.LogisticsFlightPlanMode GetRouteShipTypeFlightPlanMode(
+        Data.LogisticsRouteRecord route,
+        string typeId,
+        bool fastDisabled)
+    {
+        var mode = Data.LogisticsNetwork.GetRouteSpacecraftFlightPlanMode(route, typeId);
+        if (fastDisabled && mode == Data.LogisticsFlightPlanMode.Fast)
+        {
+            Data.LogisticsNetwork.SetRouteSpacecraftFlightPlanMode(route, typeId,
+                Data.LogisticsFlightPlanMode.Optimal);
+            return Data.LogisticsFlightPlanMode.Optimal;
+        }
+
+        return mode;
+    }
+
+    private static void SetRouteShipTypeFlightPlanMode(
+        Data.LogisticsRouteRecord route,
+        string typeId,
+        bool fastDisabled,
+        Data.LogisticsFlightPlanMode mode)
+    {
+        var normalized = fastDisabled && mode == Data.LogisticsFlightPlanMode.Fast
+            ? Data.LogisticsFlightPlanMode.Optimal
+            : NormalizeUiFlightPlanMode(mode);
+        Data.LogisticsNetwork.SetRouteSpacecraftFlightPlanMode(route, typeId, normalized);
+    }
+
+    private void AddFlightPlanModeButtons(Transform parent, Data.LogisticsFlightPlanMode? selectedMode,
+        bool fastDisabled, Action<Data.LogisticsFlightPlanMode> onSelected)
+    {
+        selectedMode = selectedMode.HasValue ? NormalizeUiFlightPlanMode(selectedMode.Value) : (Data.LogisticsFlightPlanMode?)null;
+        foreach (var mode in new[]
+                 {
+                     Data.LogisticsFlightPlanMode.Fast,
+                     Data.LogisticsFlightPlanMode.Optimal
+                 })
+        {
+            var capturedMode = mode;
+            var button = AddSmallButton(parent, FlightPlanModeLabel(mode), _runtimeStyle.ToggleOffColor, () =>
+            {
+                if (fastDisabled && capturedMode == Data.LogisticsFlightPlanMode.Fast)
+                    return;
+                onSelected?.Invoke(capturedMode);
+            }, FlightPlanModeButtonWidth(mode));
+            SetOutlinedButtonState(button, selectedMode.HasValue && selectedMode.Value == mode);
+            if (fastDisabled && mode == Data.LogisticsFlightPlanMode.Fast)
+                SetFlightPlanButtonDisabled(button);
+        }
+    }
+
+    private static void SetFlightPlanButtonDisabled(Button button)
+    {
+        if (button == null)
+            return;
+
+        button.interactable = false;
+        var style = ButtonStyle(ButtonTone.Neutral);
+        style.NormalFill = WithAlpha(VoidColor, 0.08f);
+        style.HoverFill = style.NormalFill;
+        style.PressedFill = style.NormalFill;
+        style.SelectedFill = style.NormalFill;
+        style.NormalBorder = WithAlpha(DisabledTextColor, 0.5f);
+        style.HoverBorder = style.NormalBorder;
+        style.PressedBorder = style.NormalBorder;
+        style.SelectedBorder = style.NormalBorder;
+        style.NormalText = DisabledTextColor;
+        style.HoverText = DisabledTextColor;
+        style.PressedText = DisabledTextColor;
+        style.SelectedText = DisabledTextColor;
+        ApplyButtonVisual(button, style);
+    }
+
+    private static float FlightPlanModeButtonWidth(Data.LogisticsFlightPlanMode mode)
+    {
+        return mode == Data.LogisticsFlightPlanMode.Optimal
+            ? FlightPlanModeOptimalButtonWidth
+            : FlightPlanModeFastButtonWidth;
+    }
+
+    private static string FlightPlanModeLabel(Data.LogisticsFlightPlanMode mode)
+    {
+        switch (NormalizeUiFlightPlanMode(mode))
+        {
+            case Data.LogisticsFlightPlanMode.Fast:
+                return "Fast";
+            case Data.LogisticsFlightPlanMode.Optimal:
+                return "Optimal";
+            default:
+                return "Optimal";
+        }
+    }
+
+    private static Data.LogisticsFlightPlanMode NormalizeUiFlightPlanMode(Data.LogisticsFlightPlanMode mode)
+    {
+        return LogisticsFlightCalculator.NormalizeFlightPlanMode(mode);
+    }
+
+    private static SpacecraftType RouteSpacecraftType(string typeId)
+    {
+        if (string.IsNullOrWhiteSpace(typeId))
+            return null;
+        return SerializedMonoBehaviourSingleton<AllScriptableObjectManager>.Instance?.AllSpacecraftType?.GetByID(typeId);
     }
 
     private void BuildRouteCraftRows(LogisticsSection section, Data.LogisticsRouteRecord route)
@@ -2296,28 +3467,28 @@ public class LogisticsUI : MonoBehaviour
             .ToList();
         if (craft.Count == 0)
         {
-            section.AddTextRow("No spacecraft assigned to this route.", _font, 13f, DisabledTextColor);
+            AddRouteEmptyMessageRow(section.ContentArea, "None assigned");
             return;
         }
 
-        AddRouteAssetTableHeader(section.ContentArea);
+        AddRouteAssetTableHeader(section.ContentArea, true);
         foreach (var group in craft.GroupBy(c => c.shipTypeId).OrderBy(g => GhostShipName(g.Key)))
         {
             var typeId = group.Key;
             var list = group.ToList();
             var ready = list.Count(c => c.status == Data.GhostCraftStatus.IdleAtHome && c.currentObjectId == sourceId);
-            var row = AddRouteAssetTableRow(section.ContentArea, GhostShipIcon(typeId), GhostShipName(typeId), list.Count, ready, _runtimeStyle.RowTextColor,
-                _runtimeStyle.RowBackgroundColor, 28f);
+            var row = AddRouteAssetTableRow(section.ContentArea, GhostShipIcon(typeId), GhostShipName(typeId),
+                list.Count, ready, _runtimeStyle.RowTextColor, _runtimeStyle.RowBackgroundColor, 28f,
+                controlsParent => AddRouteShipGroupFlightPlanControls(controlsParent, route, typeId, section));
             row.GetComponent<Image>().color = _runtimeStyle.RowBackgroundColor;
-            var rowButton = row.AddComponent<Button>();
-            rowButton.transition = Selectable.Transition.None;
-            rowButton.navigation = new Navigation { mode = Navigation.Mode.None };
+            var rowButton = MakeRowButton(row);
             rowButton.onClick.AddListener(() => ShowRouteShipCountEditor(section, route, typeId));
         }
     }
 
     private void ShowRouteShipCountEditor(LogisticsSection section, Data.LogisticsRouteRecord route, string typeId, int desiredCount = -1)
     {
+        SetRouteEditorMainPageVisible(false);
         section.ClearContent();
         AddBigButton(section.ContentArea, "\u2190 Back", _runtimeStyle.BackButtonColor, () =>
         {
@@ -2326,6 +3497,7 @@ public class LogisticsUI : MonoBehaviour
 
         if (route == null || string.IsNullOrWhiteSpace(typeId))
         {
+            ClearActiveRouteEditor();
             BuildRoutesSection();
             RebuildSectionLayout(section);
             return;
@@ -2384,6 +3556,8 @@ public class LogisticsUI : MonoBehaviour
         {
             ShowRouteShipCountEditor(section, route, typeId, max);
         }, 42f);
+
+        AddRouteShipTypeFlightPlanRow(section, route, typeId, desired);
 
         var confirmRow = MakeHLRow(section.ContentArea, 30f, 8);
         confirmRow.GetComponent<Image>().color = RowBgMutedColor;
@@ -2458,7 +3632,7 @@ public class LogisticsUI : MonoBehaviour
         if (source == null || player == null || string.IsNullOrWhiteSpace(typeId))
             return new List<Spacecraft>();
 
-        return Object.FindObjectsOfType<Spacecraft>()
+        return UnityEngine.Object.FindObjectsOfType<Spacecraft>()
             .Where(sc => sc != null
                 && string.Equals(sc.spacecraftType?.ID, typeId, System.StringComparison.Ordinal)
                 && Data.LogisticsNetwork.IsSpacecraftAdoptableAt(source, sc, player, out _))
@@ -2474,7 +3648,7 @@ public class LogisticsUI : MonoBehaviour
             .ToList();
         if (launchVehicles.Count == 0)
         {
-            section.AddTextRow("No launch vehicles assigned to this route.", _font, 13f, DisabledTextColor);
+            AddRouteEmptyMessageRow(section.ContentArea, "None assigned");
             return;
         }
 
@@ -2488,16 +3662,1110 @@ public class LogisticsUI : MonoBehaviour
             var row = AddRouteAssetTableRow(section.ContentArea, LaunchVehicleIcon(typeId), LaunchVehicleName(typeId), list.Count, ready, _runtimeStyle.RowTextColor,
                 _runtimeStyle.RowBackgroundColor, 28f);
             row.GetComponent<Image>().color = _runtimeStyle.RowBackgroundColor;
-            var rowButton = row.AddComponent<Button>();
-            rowButton.transition = Selectable.Transition.None;
-            rowButton.navigation = new Navigation { mode = Navigation.Mode.None };
+            var rowButton = MakeRowButton(row);
             rowButton.onClick.AddListener(() => ShowRouteLaunchVehicleCountEditor(section, route, typeId));
+        }
+    }
+
+    private void AddRouteFacilityLaunchOptionRows(LogisticsSection section, Data.LogisticsRouteRecord route)
+    {
+        if (section == null || route == null)
+            return;
+
+        var source = ResolveObjectInfo(route.sourceObjectId) ?? _currentObjectInfo;
+        var player = MonoBehaviourSingleton<GameManager>.Instance?.Player;
+        if (source == null || player == null || IsOrbitObject(source))
+            return;
+
+        var availableOptions = GetAvailableRouteFacilityLaunchOptions(source, player);
+
+        NormalizeRouteFacilityLaunchSettings(route);
+        var optionsByCategory = availableOptions.ToDictionary(option => option.Category, StringComparer.Ordinal);
+
+        var visibleOptionCount = RouteFacilityLaunchCategories.Length;
+        var tileRowCount = Mathf.Max(1, Mathf.CeilToInt(visibleOptionCount / (float)RouteFacilityLaunchTilesPerRow));
+        var shell = MakeRouteFacilityLaunchSectionShell(section.ContentArea, tileRowCount);
+
+        GameObject tileRow = null;
+        var tilesInRow = 0;
+
+        foreach (var category in RouteFacilityLaunchCategories)
+        {
+            if (!optionsByCategory.TryGetValue(category, out var option))
+                option = CreateUnavailableRouteFacilityLaunchOption(category);
+
+            if (tileRow == null || tilesInRow >= RouteFacilityLaunchTilesPerRow)
+            {
+                tileRow = MakeRouteFacilityLaunchTileRow(shell.transform);
+                tilesInRow = 0;
+            }
+
+            var capturedCategory = category;
+            var enabled = IsRouteFacilityLaunchCategoryEnabled(route, capturedCategory);
+            AddRouteFacilityLaunchTile(tileRow.transform, option, enabled, option.IsAvailable, () =>
+            {
+                SetRouteFacilityLaunchCategoryEnabled(route, capturedCategory,
+                    !IsRouteFacilityLaunchCategoryEnabled(route, capturedCategory));
+                ShowRouteEditor(section, route);
+            });
+            tilesInRow++;
+        }
+    }
+
+    private static RouteFacilityLaunchOptionUi CreateUnavailableRouteFacilityLaunchOption(string category)
+    {
+        var normalized = NormalizeRouteFacilityLaunchCategory(category);
+        var option = new RouteFacilityLaunchOptionUi
+        {
+            Category = normalized,
+            IconSprite = RouteFacilityLaunchRepresentativeSprite(normalized),
+            Icon = RouteFacilityLaunchFallbackIcon(normalized),
+            Count = 0,
+            IsAvailable = false
+        };
+        option.Details.Add("Not available at this route source");
+        return option;
+    }
+
+    private static bool IsOrbitObject(ObjectInfo oi)
+    {
+        return oi != null
+            && (oi.objectTypes == global::Data.EObjectTypes.Orbit
+                || (oi.ObjectName?.IndexOf("[ORBIT]", StringComparison.OrdinalIgnoreCase) ?? -1) >= 0);
+    }
+
+    private GameObject MakeRouteFacilityLaunchSectionShell(Transform parent, int tileRowCount)
+    {
+        var rowCount = Mathf.Max(1, tileRowCount);
+        var preferredHeight = (RouteFacilityLaunchSectionVerticalPadding * 2f)
+            + (rowCount * RouteFacilityLaunchOptionHeight)
+            + (Mathf.Max(0, rowCount - 1) * RouteFacilityLaunchTileGap);
+        var shell = new GameObject("RouteFacilityLaunchSection", typeof(RectTransform),
+            typeof(VerticalLayoutGroup), typeof(LayoutElement));
+        shell.transform.SetParent(parent, false);
+
+        var layout = shell.GetComponent<VerticalLayoutGroup>();
+        layout.childForceExpandWidth = true;
+        layout.childForceExpandHeight = false;
+        layout.childControlWidth = true;
+        layout.childControlHeight = true;
+        layout.childAlignment = TextAnchor.UpperLeft;
+        layout.spacing = RouteFacilityLaunchTileGap;
+        layout.padding = new RectOffset(RouteFacilityLaunchSectionHorizontalPadding, RouteFacilityLaunchSectionHorizontalPadding,
+            RouteFacilityLaunchSectionVerticalPadding, RouteFacilityLaunchSectionVerticalPadding);
+
+        var layoutElement = shell.GetComponent<LayoutElement>();
+        layoutElement.minHeight = preferredHeight;
+        layoutElement.preferredHeight = preferredHeight;
+        layoutElement.flexibleWidth = 1f;
+        layoutElement.flexibleHeight = 0f;
+
+        return shell;
+    }
+
+    private GameObject MakeRouteFacilityLaunchTileRow(Transform parent)
+    {
+        var row = new GameObject("RouteFacilityLaunchTiles", typeof(RectTransform), typeof(HorizontalLayoutGroup),
+            typeof(LayoutElement));
+        row.transform.SetParent(parent, false);
+
+        var layout = row.GetComponent<HorizontalLayoutGroup>();
+        layout.childForceExpandWidth = true;
+        layout.childForceExpandHeight = false;
+        layout.childControlWidth = true;
+        layout.childControlHeight = true;
+        layout.childAlignment = TextAnchor.MiddleCenter;
+        layout.spacing = RouteFacilityLaunchTileGap;
+        layout.padding = new RectOffset(0, 0, 0, 0);
+
+        var layoutElement = row.GetComponent<LayoutElement>();
+        layoutElement.minHeight = RouteFacilityLaunchOptionHeight;
+        layoutElement.preferredHeight = RouteFacilityLaunchOptionHeight;
+        layoutElement.flexibleWidth = 1f;
+        layoutElement.flexibleHeight = 0f;
+        return row;
+    }
+
+    private Button AddRouteFacilityLaunchTile(Transform parent, RouteFacilityLaunchOptionUi option, bool enabled,
+        bool available, UnityEngine.Events.UnityAction onClick)
+    {
+        var btnGo = new GameObject("RouteFacilityLaunchOption", typeof(RectTransform), typeof(Image), typeof(RectMask2D),
+            typeof(HorizontalLayoutGroup), typeof(Button), typeof(LayoutElement));
+        btnGo.transform.SetParent(parent, false);
+
+        var layout = btnGo.GetComponent<LayoutElement>();
+        layout.minWidth = RouteFacilityLaunchOptionWidth;
+        layout.preferredWidth = RouteFacilityLaunchOptionWidth;
+        layout.minHeight = RouteFacilityLaunchOptionHeight;
+        layout.preferredHeight = RouteFacilityLaunchOptionHeight;
+        layout.flexibleWidth = 1f;
+        layout.flexibleHeight = 0f;
+
+        var buttonLayout = btnGo.GetComponent<HorizontalLayoutGroup>();
+        buttonLayout.childForceExpandWidth = false;
+        buttonLayout.childForceExpandHeight = false;
+        buttonLayout.childControlWidth = true;
+        buttonLayout.childControlHeight = true;
+        buttonLayout.childAlignment = TextAnchor.MiddleLeft;
+        buttonLayout.spacing = RouteFacilityLaunchTileGap;
+        buttonLayout.padding = new RectOffset(RouteFacilityLaunchTileHorizontalPadding,
+            RouteFacilityLaunchTileHorizontalPadding, RouteFacilityLaunchTileVerticalPadding,
+            RouteFacilityLaunchTileVerticalPadding);
+
+        var image = btnGo.GetComponent<Image>();
+        image.color = RouteFacilityLaunchTileFill(enabled, available);
+        image.raycastTarget = true;
+
+        var button = btnGo.GetComponent<Button>();
+        button.transition = Selectable.Transition.None;
+        button.navigation = new Navigation { mode = Navigation.Mode.None };
+        button.targetGraphic = image;
+        button.interactable = true;
+        if (onClick != null)
+            button.onClick.AddListener(onClick);
+
+        AddButtonBorder(btnGo, RouteFacilityLaunchTileBorder(enabled, available));
+        ApplyButtonVisual(button, RouteFacilityLaunchTileStyle(enabled, available));
+
+        var iconColor = RouteFacilityLaunchIconColor(enabled, available);
+        if (option?.IconSprite != null)
+        {
+            var iconGo = new GameObject("Icon", typeof(RectTransform), typeof(Image), typeof(LayoutElement));
+            iconGo.transform.SetParent(btnGo.transform, false);
+            var iconImage = iconGo.GetComponent<Image>();
+            iconImage.sprite = option.IconSprite;
+            iconImage.color = iconColor;
+            iconImage.preserveAspect = true;
+            iconImage.raycastTarget = false;
+            ApplyRouteFacilityLaunchIconLayout(iconGo);
+        }
+        else
+        {
+            var iconText = string.IsNullOrWhiteSpace(option?.Icon)
+                ? RouteFacilityLaunchFallbackIcon(option?.Category)
+                : option.Icon;
+            iconText = TintRouteFacilityLaunchIcon(iconText, iconColor);
+            var icon = MakeTMP(btnGo.transform, iconText, RouteFacilityLaunchIconFontSize(iconText), iconColor);
+            icon.alignment = TextAlignmentOptions.Center;
+            icon.enableWordWrapping = false;
+            icon.overflowMode = TextOverflowModes.Overflow;
+            icon.fontStyle = FontStyles.Bold;
+            icon.margin = Vector4.zero;
+            icon.rectTransform.offsetMin = Vector2.zero;
+            icon.rectTransform.offsetMax = Vector2.zero;
+            ApplyRouteFacilityLaunchIconLayout(icon.gameObject);
+        }
+
+        var textStack = new GameObject("Text", typeof(RectTransform), typeof(VerticalLayoutGroup), typeof(LayoutElement));
+        textStack.transform.SetParent(btnGo.transform, false);
+        var textLayout = textStack.GetComponent<VerticalLayoutGroup>();
+        textLayout.childForceExpandWidth = true;
+        textLayout.childForceExpandHeight = false;
+        textLayout.childControlWidth = true;
+        textLayout.childControlHeight = true;
+        textLayout.childAlignment = TextAnchor.MiddleLeft;
+        textLayout.spacing = 0f;
+        textLayout.padding = new RectOffset(0, 0, 0, 0);
+        var textLayoutElement = textStack.GetComponent<LayoutElement>();
+        textLayoutElement.minWidth = 0f;
+        textLayoutElement.preferredWidth = 0f;
+        textLayoutElement.flexibleWidth = 1f;
+        textLayoutElement.minHeight = RouteFacilityLaunchOptionHeight - (RouteFacilityLaunchTileVerticalPadding * 2f);
+        textLayoutElement.preferredHeight = RouteFacilityLaunchOptionHeight - (RouteFacilityLaunchTileVerticalPadding * 2f);
+
+        var name = MakeTMP(textStack.transform, RouteFacilityLaunchButtonLabel(option?.Category), 11.2f, iconColor);
+        name.alignment = TextAlignmentOptions.MidlineLeft;
+        name.enableWordWrapping = false;
+        name.overflowMode = TextOverflowModes.Ellipsis;
+        name.fontStyle = FontStyles.Bold;
+        name.rectTransform.offsetMin = Vector2.zero;
+        name.rectTransform.offsetMax = Vector2.zero;
+        var nameLayout = name.gameObject.AddComponent<LayoutElement>();
+        nameLayout.minHeight = 18f;
+        nameLayout.preferredHeight = 18f;
+        nameLayout.flexibleWidth = 1f;
+
+        var state = MakeTMP(textStack.transform, RouteFacilityLaunchStateLabel(option, enabled, available), 9.6f, iconColor);
+        state.alignment = TextAlignmentOptions.MidlineLeft;
+        state.enableWordWrapping = false;
+        state.overflowMode = TextOverflowModes.Ellipsis;
+        state.rectTransform.offsetMin = Vector2.zero;
+        state.rectTransform.offsetMax = Vector2.zero;
+        var stateLayout = state.gameObject.AddComponent<LayoutElement>();
+        stateLayout.minHeight = 14f;
+        stateLayout.preferredHeight = 14f;
+        stateLayout.flexibleWidth = 1f;
+
+        var tooltip = btnGo.AddComponent<SmallHoverTooltip>();
+        tooltip.Configure(RouteFacilityLaunchTooltip(option, enabled, available), _font,
+            _popupRoot != null ? _popupRoot.GetComponent<RectTransform>() : null);
+        return button;
+    }
+
+    private static void ApplyRouteFacilityLaunchIconLayout(GameObject iconGo)
+    {
+        if (iconGo == null)
+            return;
+
+        var iconLayout = iconGo.GetComponent<LayoutElement>() ?? iconGo.AddComponent<LayoutElement>();
+        iconLayout.minWidth = RouteFacilityLaunchIconColumnWidth;
+        iconLayout.preferredWidth = RouteFacilityLaunchIconColumnWidth;
+        iconLayout.minHeight = RouteFacilityLaunchOptionHeight - (RouteFacilityLaunchTileVerticalPadding * 2f);
+        iconLayout.preferredHeight = RouteFacilityLaunchOptionHeight - (RouteFacilityLaunchTileVerticalPadding * 2f);
+        iconLayout.flexibleWidth = 0f;
+        iconLayout.flexibleHeight = 0f;
+    }
+
+    private static ButtonVisualStyle RouteFacilityLaunchTileStyle(bool enabled, bool available)
+    {
+        if (!available)
+        {
+            var fill = RouteFacilityLaunchTileFill(enabled, false);
+            var border = RouteFacilityLaunchTileBorder(enabled, false);
+            var text = RouteFacilityLaunchIconColor(enabled, false);
+            var accent = enabled ? TertiaryTextColor : WarningColor;
+            return new ButtonVisualStyle
+            {
+                HasBorder = true,
+                NormalFill = fill,
+                HoverFill = enabled ? WithAlpha(HoverColor, 0.18f) : WithAlpha(WarningColor, 0.105f),
+                PressedFill = enabled ? WithAlpha(HoverColor, 0.28f) : WithAlpha(WarningColor, 0.17f),
+                SelectedFill = fill,
+                NormalBorder = border,
+                HoverBorder = WithAlpha(accent, enabled ? 0.44f : 0.52f),
+                PressedBorder = PrimaryTextColor,
+                SelectedBorder = border,
+                NormalText = text,
+                HoverText = enabled ? SecondaryTextColor : PrimaryTextColor,
+                PressedText = PrimaryTextColor,
+                SelectedText = text
+            };
+        }
+
+        if (!enabled)
+        {
+            var fill = RouteFacilityLaunchTileFill(false, available);
+            var border = RouteFacilityLaunchTileBorder(false, available);
+            var text = RouteFacilityLaunchIconColor(false, available);
+            return new ButtonVisualStyle
+            {
+                HasBorder = true,
+                NormalFill = fill,
+                HoverFill = WithAlpha(CriticalColor, 0.15f),
+                PressedFill = WithAlpha(CriticalColor, 0.24f),
+                SelectedFill = fill,
+                NormalBorder = border,
+                HoverBorder = WithAlpha(CriticalColor, 0.62f),
+                PressedBorder = PrimaryTextColor,
+                SelectedBorder = border,
+                NormalText = text,
+                HoverText = PrimaryTextColor,
+                PressedText = PrimaryTextColor,
+                SelectedText = text
+            };
+        }
+
+        return new ButtonVisualStyle
+        {
+            HasBorder = true,
+            NormalFill = WithAlpha(NominalColor, 0.1f),
+            HoverFill = WithAlpha(NominalColor, 0.18f),
+            PressedFill = WithAlpha(NominalColor, 0.26f),
+            SelectedFill = WithAlpha(NominalColor, 0.1f),
+            NormalBorder = WithAlpha(NominalColor, 0.56f),
+            HoverBorder = WithAlpha(NominalColor, 0.76f),
+            PressedBorder = PrimaryTextColor,
+            SelectedBorder = WithAlpha(NominalColor, 0.56f),
+            NormalText = RouteFacilityLaunchIconColor(true, true),
+            HoverText = PrimaryTextColor,
+            PressedText = PrimaryTextColor,
+            SelectedText = RouteFacilityLaunchIconColor(true, true)
+        };
+    }
+
+    private static Color RouteFacilityLaunchTileFill(bool enabled, bool available)
+    {
+        if (!available)
+            return enabled ? WithAlpha(HoverColor, 0.1f) : WithAlpha(WarningColor, 0.055f);
+        if (!enabled)
+            return WithAlpha(CriticalColor, 0.075f);
+        return WithAlpha(NominalColor, 0.1f);
+    }
+
+    private static Color RouteFacilityLaunchTileBorder(bool enabled, bool available)
+    {
+        if (!available)
+            return enabled ? WithAlpha(TertiaryTextColor, 0.24f) : WithAlpha(WarningColor, 0.34f);
+        if (!enabled)
+            return WithAlpha(CriticalColor, 0.42f);
+        return WithAlpha(NominalColor, 0.56f);
+    }
+
+    private static Color RouteFacilityLaunchIconColor(bool enabled, bool available)
+    {
+        if (!available)
+            return enabled
+                ? WithAlpha(TertiaryTextColor, 0.74f)
+                : WithAlpha(Color.Lerp(TertiaryTextColor, WarningColor, 0.56f), 0.84f);
+        if (!enabled)
+            return WithAlpha(Color.Lerp(TertiaryTextColor, CriticalColor, 0.58f), 0.84f);
+        return Color.Lerp(SecondaryTextColor, NominalColor, 0.34f);
+    }
+
+    private static string TintRouteFacilityLaunchIcon(string iconText, Color color)
+    {
+        if (string.IsNullOrWhiteSpace(iconText))
+            return iconText;
+
+        var hex = ColorUtility.ToHtmlStringRGBA(color);
+        var colorIndex = iconText.IndexOf("color=", StringComparison.OrdinalIgnoreCase);
+        if (colorIndex >= 0)
+        {
+            var valueStart = colorIndex + "color=".Length;
+            var valueEnd = iconText.IndexOfAny(new[] { ' ', '>' }, valueStart);
+            if (valueEnd < 0)
+                valueEnd = iconText.Length;
+            return iconText.Substring(0, valueStart) + $"#{hex}" + iconText.Substring(valueEnd);
+        }
+
+        if (iconText.IndexOf("<sprite", StringComparison.OrdinalIgnoreCase) >= 0)
+            return $"<color=#{hex}>{iconText}</color>";
+
+        return iconText;
+    }
+
+    private static string RouteFacilityLaunchStateLabel(RouteFacilityLaunchOptionUi option, bool enabled, bool available)
+    {
+        if (!available)
+            return enabled ? "Missing" : "Missing Disabled";
+
+        if (!enabled)
+            return "Disabled";
+
+        return option != null && option.Count > 1 ? $"Enabled x{option.Count}" : "Enabled";
+    }
+
+    private static string RouteFacilityLaunchTooltip(RouteFacilityLaunchOptionUi option, bool enabled, bool available)
+    {
+        var label = RouteFacilityLaunchButtonLabel(option?.Category);
+        if (option == null)
+            return label;
+
+        var detail = option.Details.FirstOrDefault(text => !string.IsNullOrWhiteSpace(text));
+        var state = RouteFacilityLaunchStateLabel(option, enabled, available);
+        var prefix = $"{label} - {state}";
+        return string.IsNullOrWhiteSpace(detail) ? prefix : $"{prefix}: {detail}";
+    }
+
+    private static string RouteFacilityLaunchFallbackIcon(string category)
+    {
+        var representativeIcon = RouteFacilityLaunchRepresentativeIcon(category);
+        if (!string.IsNullOrWhiteSpace(representativeIcon))
+            return representativeIcon;
+
+        switch (NormalizeRouteFacilityLaunchCategory(category))
+        {
+            case RouteLaunchCategoryMagneticRails:
+            case RouteLaunchCategoryLaunchPad:
+            case RouteLaunchCategoryRotary:
+            case RouteLaunchCategorySpaceElevator:
+            case RouteLaunchCategoryElectromagneticCatapult:
+            case RouteLaunchCategoryMassDriver:
+                return RouteFacilityLaunchFallbackInitials(category);
+            default:
+                return RouteFacilityLaunchFallbackInitials(RouteLaunchCategoryLaunchPad);
+        }
+    }
+
+    private static string RouteFacilityLaunchFallbackInitials(string category)
+    {
+        switch (NormalizeRouteFacilityLaunchCategory(category))
+        {
+            case RouteLaunchCategoryMagneticRails:
+                return "MR";
+            case RouteLaunchCategoryLaunchPad:
+                return "LP";
+            case RouteLaunchCategoryRotary:
+                return "RL";
+            case RouteLaunchCategorySpaceElevator:
+                return "SE";
+            case RouteLaunchCategoryElectromagneticCatapult:
+                return "EC";
+            case RouteLaunchCategoryMassDriver:
+                return "MD";
+            default:
+                return "LP";
+        }
+    }
+
+    private static Sprite RouteFacilityLaunchRepresentativeSprite(string category)
+    {
+        var normalized = NormalizeRouteFacilityLaunchCategory(category);
+        if (string.Equals(normalized, RouteLaunchCategorySpaceElevator, StringComparison.Ordinal))
+            return null;
+
+        return RouteFacilityLaunchRepresentativeFacilitySprite(normalized);
+    }
+
+    private static Sprite RouteFacilityLaunchRepresentativeFacilitySprite(string category)
+    {
+        foreach (var candidate in EnumerateRouteFacilityLaunchDescriptors()
+                     .Select(facility => new
+                     {
+                         Facility = facility,
+                         Rank = RouteFacilityLaunchFacilityRepresentativeRank(facility, category)
+                     })
+                     .Where(candidate => candidate.Rank < 100)
+                     .OrderBy(candidate => candidate.Rank)
+                     .ThenBy(candidate => FacilityLaunchDisplayName(candidate.Facility), StringComparer.OrdinalIgnoreCase))
+        {
+            var sprite = RouteFacilityLaunchDescriptorSprite(candidate.Facility);
+            if (sprite != null)
+                return sprite;
+        }
+
+        return null;
+    }
+
+    private static string RouteFacilityLaunchRepresentativeIcon(string category)
+    {
+        var normalized = NormalizeRouteFacilityLaunchCategory(category);
+        var facilityIcon = RouteFacilityLaunchRepresentativeFacilityIcon(normalized);
+        if (!string.IsNullOrWhiteSpace(facilityIcon))
+            return facilityIcon;
+
+        var allTypes = SerializedMonoBehaviourSingleton<AllScriptableObjectManager>.Instance?.AllLaunchVehicleType;
+        if (allTypes == null)
+            return "";
+
+        foreach (var type in EnumerateLaunchVehicleTypes(allTypes)
+                     .Where(type => IsRepresentativeRouteFacilityLaunchType(type, normalized))
+                     .OrderBy(type => RouteFacilityLaunchRepresentativeRank(type, normalized))
+                     .ThenBy(type => type.Name ?? "", StringComparer.OrdinalIgnoreCase))
+        {
+            var icon = ShipIcon(type.SpriteId);
+            if (!string.IsNullOrWhiteSpace(icon))
+                return icon;
+        }
+
+        if (string.Equals(normalized, RouteLaunchCategoryElectromagneticCatapult, StringComparison.Ordinal))
+            return "";
+
+        return "";
+    }
+
+    private static string RouteFacilityLaunchRepresentativeFacilityIcon(string category)
+    {
+        foreach (var candidate in EnumerateRouteFacilityLaunchDescriptors()
+                     .Select(facility => new
+                     {
+                         Facility = facility,
+                         Rank = RouteFacilityLaunchFacilityRepresentativeRank(facility, category)
+                     })
+                     .Where(candidate => candidate.Rank < 100)
+                     .OrderBy(candidate => candidate.Rank)
+                     .ThenBy(candidate => FacilityLaunchDisplayName(candidate.Facility), StringComparer.OrdinalIgnoreCase))
+        {
+            var icon = RouteFacilityLaunchIconForFacility(candidate.Facility,
+                RouteFacilityLaunchFakeType(candidate.Facility), category);
+            if (!string.IsNullOrWhiteSpace(icon))
+                return icon;
+        }
+
+        return "";
+    }
+
+    private static int RouteFacilityLaunchFacilityRepresentativeRank(global::Data.ScriptableObject.GroundFacilityDescriptor facility,
+        string category)
+    {
+        if (facility == null)
+            return 100;
+
+        var type = RouteFacilityLaunchFakeType(facility);
+        var facilityText = RouteFacilityLaunchDescriptorSearchText(facility);
+        var typeText = RouteFacilityLaunchSearchText(type?.Name, type?.ID);
+        var classified = ClassifyRouteFacilityLaunchCategory(facilityText, typeText);
+        if (!string.Equals(classified, category, StringComparison.Ordinal))
+            return 100;
+
+        switch (category)
+        {
+            case RouteLaunchCategoryMagneticRails:
+                if (facilityText.Contains("magnetic launch rail"))
+                    return 0;
+                if (facilityText.Contains("launch rail") || facilityText.Contains(" rail"))
+                    return 5;
+                break;
+            case RouteLaunchCategoryLaunchPad:
+                if (facilityText.Contains("launch pad"))
+                    return 0;
+                if (facilityText.Contains(" pad"))
+                    return 5;
+                if (typeText.Contains("launch pad") || typeText.Contains(" pad"))
+                    return 10;
+                if (facilityText.Contains("launch facility") || facilityText.Contains("facility"))
+                    return 80;
+                break;
+            case RouteLaunchCategoryRotary:
+                if (facilityText.Contains("rotary launcher") || facilityText.Contains("rotary"))
+                    return 0;
+                if (facilityText.Contains("spin"))
+                    return 5;
+                break;
+            case RouteLaunchCategorySpaceElevator:
+                if (facilityText.Contains("space elevator") || facilityText.Contains("elevator"))
+                    return 0;
+                break;
+            case RouteLaunchCategoryElectromagneticCatapult:
+                if (facilityText.Contains("electromagnetic catapult"))
+                    return 0;
+                if (facilityText.Contains("electromagnetic") || facilityText.Contains("catapult"))
+                    return 5;
+                break;
+            case RouteLaunchCategoryMassDriver:
+                if (facilityText.Contains("stationary mass driver"))
+                    return 0;
+                if (facilityText.Contains("mass driver"))
+                    return 5;
+                break;
+        }
+
+        return 25;
+    }
+
+    private static IEnumerable<global::Data.ScriptableObject.GroundFacilityDescriptor> EnumerateRouteFacilityLaunchDescriptors()
+    {
+        var allFacilities = SerializedMonoBehaviourSingleton<AllScriptableObjectManager>.Instance?.AllFacility;
+        if (allFacilities?.ListNotEmpty == null)
+            yield break;
+
+        foreach (var facility in allFacilities.ListNotEmpty.OfType<global::Data.ScriptableObject.GroundFacilityDescriptor>())
+        {
+            if (facility == null)
+                continue;
+
+            if (facility.facilityType.HasFlag(global::Data.ScriptableObject.FacilityBaseDescriptor.EFacilityType.LaunchFacility)
+                || facility.bonusData?.bonus == EBonus.LaunchCostOptionInPlanMission)
+                yield return facility;
+        }
+    }
+
+    private static LaunchVehicleType RouteFacilityLaunchFakeType(global::Data.ScriptableObject.GroundFacilityDescriptor facility)
+    {
+        if (facility == null || string.IsNullOrWhiteSpace(facility.bonusData?.fakeLVId))
+            return null;
+
+        return SerializedMonoBehaviourSingleton<AllScriptableObjectManager>.Instance?.AllLaunchVehicleType
+            ?.GetByID(facility.bonusData.fakeLVId);
+    }
+
+    private static string FacilityLaunchDisplayName(global::Data.ScriptableObject.FacilityBaseDescriptor facility)
+    {
+        if (facility == null)
+            return "";
+
+        if (!string.IsNullOrWhiteSpace(facility.Name))
+            return facility.Name;
+        if (!string.IsNullOrWhiteSpace(facility.ID))
+            return facility.ID;
+        return facility.name ?? "";
+    }
+
+    private static string RouteFacilityLaunchDescriptorSearchText(global::Data.ScriptableObject.FacilityBaseDescriptor facility)
+    {
+        if (facility == null)
+            return "";
+
+        return RouteFacilityLaunchSearchText(facility.Name, facility.ID, facility.name);
+    }
+
+    private static string RouteFacilityLaunchSearchText(params string[] parts)
+    {
+        var text = string.Join(" ", parts.Where(part => !string.IsNullOrWhiteSpace(part)));
+        if (string.IsNullOrWhiteSpace(text))
+            return "";
+
+        text = text.Replace('_', ' ').Replace('-', ' ').ToLowerInvariant();
+        while (text.Contains("  "))
+            text = text.Replace("  ", " ");
+        return text.Trim();
+    }
+
+    private static string RouteFacilityLaunchIconForFacility(global::Data.ScriptableObject.FacilityBaseDescriptor facility,
+        LaunchVehicleType type, string category)
+    {
+        if (string.Equals(NormalizeRouteFacilityLaunchCategory(category), RouteLaunchCategorySpaceElevator, StringComparison.Ordinal))
+            return RouteFacilityLaunchTypeIcon(type);
+
+        var facilityIcon = RouteFacilityLaunchDescriptorIcon(facility);
+        var typeIcon = RouteFacilityLaunchTypeIcon(type);
+        return !string.IsNullOrWhiteSpace(facilityIcon) ? facilityIcon : typeIcon;
+    }
+
+    private static Sprite RouteFacilityLaunchDescriptorSprite(global::Data.ScriptableObject.FacilityBaseDescriptor facility)
+    {
+        var sprite = facility?.Sprite;
+        if (sprite == null || !IsUsableRouteFacilitySpriteId(sprite.name))
+            return null;
+
+        return sprite;
+    }
+
+    private static string RouteFacilityLaunchDescriptorIcon(global::Data.ScriptableObject.FacilityBaseDescriptor facility)
+    {
+        var sprite = RouteFacilityLaunchDescriptorSprite(facility);
+        if (sprite == null)
+            return "";
+
+        var icon = ShipIcon(sprite.name);
+        return IsPlaceholderRouteFacilityIcon(icon) ? "" : icon;
+    }
+
+    private static string RouteFacilityLaunchTypeIcon(LaunchVehicleType type)
+    {
+        if (type == null || !IsUsableRouteFacilitySpriteId(type.SpriteId))
+            return "";
+
+        var icon = ShipIcon(type.SpriteId);
+        return IsPlaceholderRouteFacilityIcon(icon) ? "" : icon;
+    }
+
+    private static bool IsUsableRouteFacilitySpriteId(string spriteId)
+    {
+        if (string.IsNullOrWhiteSpace(spriteId))
+            return false;
+
+        var lower = spriteId.Trim().ToLowerInvariant();
+        return !lower.Contains("empty string")
+            && !lower.Contains("no sprite")
+            && !lower.Contains("missing sprite");
+    }
+
+    private static bool IsPlaceholderRouteFacilityIcon(string icon)
+    {
+        if (string.IsNullOrWhiteSpace(icon))
+            return true;
+
+        var lower = icon.ToLowerInvariant();
+        return lower.Contains("empty string")
+            || lower.Contains("no sprite")
+            || lower.Contains("missing sprite");
+    }
+
+    private static IEnumerable<LaunchVehicleType> EnumerateLaunchVehicleTypes(object allTypes)
+    {
+        if (allTypes == null)
+            yield break;
+
+        foreach (var memberName in new[] { "ListNotEmpty", "List", "list", "All", "all" })
+        {
+            var prop = allTypes.GetType().GetProperty(memberName);
+            if (prop != null && prop.GetValue(allTypes, null) is IEnumerable propItems)
+            {
+                foreach (var item in propItems)
+                    if (item is LaunchVehicleType type)
+                        yield return type;
+                yield break;
+            }
+
+            var field = allTypes.GetType().GetField(memberName);
+            if (field != null && field.GetValue(allTypes) is IEnumerable fieldItems)
+            {
+                foreach (var item in fieldItems)
+                    if (item is LaunchVehicleType type)
+                        yield return type;
+                yield break;
+            }
+        }
+    }
+
+    private static bool IsRepresentativeRouteFacilityLaunchType(LaunchVehicleType type, string category)
+    {
+        if (type == null || string.IsNullOrWhiteSpace(type.SpriteId))
+            return false;
+
+        var name = type.Name ?? "";
+        var classified = ClassifyRouteFacilityLaunchCategory("", name);
+        if (string.Equals(classified, category, StringComparison.Ordinal))
+            return true;
+
+        if (string.Equals(category, RouteLaunchCategoryLaunchPad, StringComparison.Ordinal))
+            return type.FakeForFacility
+                || name.IndexOf("pad", StringComparison.OrdinalIgnoreCase) >= 0
+                || name.IndexOf("facility", StringComparison.OrdinalIgnoreCase) >= 0
+                || name.IndexOf("launcher", StringComparison.OrdinalIgnoreCase) >= 0;
+
+        return false;
+    }
+
+    private static int RouteFacilityLaunchRepresentativeRank(LaunchVehicleType type, string category)
+    {
+        if (type == null)
+            return 100;
+
+        var name = type.Name ?? "";
+        if (string.Equals(category, RouteLaunchCategoryLaunchPad, StringComparison.Ordinal))
+        {
+            if (type.FakeForFacility)
+                return 0;
+            if (name.IndexOf("pad", StringComparison.OrdinalIgnoreCase) >= 0)
+                return 1;
+            if (name.IndexOf("facility", StringComparison.OrdinalIgnoreCase) >= 0)
+                return 2;
+            if (name.IndexOf("launcher", StringComparison.OrdinalIgnoreCase) >= 0)
+                return 3;
+        }
+
+        if (ClassifyRouteFacilityLaunchCategory("", name) == category)
+            return 0;
+        return 50;
+    }
+
+    private static float RouteFacilityLaunchIconFontSize(string iconText)
+    {
+        return !string.IsNullOrWhiteSpace(iconText) && iconText.IndexOf("<sprite", StringComparison.OrdinalIgnoreCase) >= 0
+            ? 18f
+            : 12f;
+    }
+
+    private static List<RouteFacilityLaunchOptionUi> GetAvailableRouteFacilityLaunchOptions(ObjectInfo source, Company player)
+    {
+        var options = new Dictionary<string, RouteFacilityLaunchOptionUi>(StringComparer.Ordinal);
+        if (source == null || player == null)
+            return new List<RouteFacilityLaunchOptionUi>();
+
+        var objectData = source.GetObjectInfoData(player);
+        var seen = new HashSet<int>();
+        var rows = source.GetListLaunchVehicle(player);
+        if (rows != null)
+        {
+            foreach (var row in rows)
+                AddRouteFacilityLaunchOptionForVehicle(options, seen, source, player, objectData, row?.launchVehicle);
+        }
+
+        if (source.ListLaunchVehicle != null)
+        {
+            foreach (var lv in source.ListLaunchVehicle)
+                AddRouteFacilityLaunchOptionForVehicle(options, seen, source, player, objectData, lv);
+        }
+
+        AddBuiltRouteFacilityLaunchOptions(options, objectData);
+
+        return RouteFacilityLaunchCategories
+            .Select(category => options.TryGetValue(category, out var option) ? option : null)
+            .Where(option => option != null)
+            .ToList();
+    }
+
+    private static void AddBuiltRouteFacilityLaunchOptions(Dictionary<string, RouteFacilityLaunchOptionUi> options, ObjectInfoData objectData)
+    {
+        if (options == null || objectData?.ListFacility == null)
+            return;
+
+        foreach (var facility in objectData.ListFacility)
+        {
+            if (!TryGetBuiltEnabledRouteFacilityLaunchCategory(facility, out var category))
+                continue;
+            if (options.ContainsKey(category))
+                continue;
+
+            var iconSprite = string.Equals(category, RouteLaunchCategorySpaceElevator, StringComparison.Ordinal)
+                ? null
+                : RouteFacilityLaunchRepresentativeSprite(category);
+            var icon = RouteFacilityLaunchRepresentativeIcon(category);
+            if (string.IsNullOrWhiteSpace(icon))
+            {
+                var type = RouteFacilityLaunchFakeType(facility.facilityDescriptor as global::Data.ScriptableObject.GroundFacilityDescriptor);
+                icon = RouteFacilityLaunchIconForFacility(facility.facilityDescriptor, type, category);
+            }
+            if (string.IsNullOrWhiteSpace(icon))
+                icon = RouteFacilityLaunchFallbackIcon(category);
+
+            var option = new RouteFacilityLaunchOptionUi
+            {
+                Category = category,
+                IconSprite = iconSprite,
+                Icon = icon,
+                Count = (int)Math.Max(1, Math.Min(int.MaxValue, facility.Enabled)),
+                IsAvailable = true
+            };
+
+            var detail = RouteFacilityLaunchDetail(facility, null);
+            if (!string.IsNullOrWhiteSpace(detail))
+                option.Details.Add(detail);
+            options[category] = option;
+        }
+    }
+
+    private static bool TryGetBuiltEnabledRouteFacilityLaunchCategory(Facility facility, out string category)
+    {
+        category = "";
+        if (facility?.facilityDescriptor == null)
+            return false;
+        if (facility.BuildProgress < 1f || facility.Enabled <= 0 || facility.SinglePowerProductionMultiplier < 0.999)
+            return false;
+
+        category = GetRouteFacilityLaunchCategory(facility.facilityDescriptor);
+        return IsRouteFacilityLaunchCategory(category)
+            && IsRouteFacilityLaunchDescriptor(facility.facilityDescriptor, category);
+    }
+
+    private static string GetRouteFacilityLaunchCategory(global::Data.ScriptableObject.FacilityBaseDescriptor descriptor)
+    {
+        if (descriptor == null)
+            return "";
+
+        var type = RouteFacilityLaunchFakeType(descriptor as global::Data.ScriptableObject.GroundFacilityDescriptor);
+        return ClassifyRouteFacilityLaunchCategory(
+            RouteFacilityLaunchDescriptorSearchText(descriptor),
+            RouteFacilityLaunchSearchText(type?.Name, type?.ID, type?.name));
+    }
+
+    private static bool IsRouteFacilityLaunchDescriptor(global::Data.ScriptableObject.FacilityBaseDescriptor descriptor,
+        string category)
+    {
+        if (descriptor == null)
+            return false;
+
+        var normalized = NormalizeRouteFacilityLaunchCategory(category);
+        if (string.Equals(normalized, RouteLaunchCategorySpaceElevator, StringComparison.Ordinal)
+            && descriptor is global::Data.ScriptableObject.GroundFacilityDescriptor elevatorGround
+            && elevatorGround.bonusData?.spaceElevatorPrefab3dView != null)
+            return true;
+
+        if (descriptor is global::Data.ScriptableObject.GroundFacilityDescriptor ground)
+        {
+            if (ground.facilityType.HasFlag(global::Data.ScriptableObject.FacilityBaseDescriptor.EFacilityType.LaunchFacility)
+                || ground.bonusData?.bonus == EBonus.LaunchCostOptionInPlanMission)
+                return true;
+
+            var type = RouteFacilityLaunchFakeType(ground);
+            if (type != null && RouteFacilityLaunchSearchTextMatchesCategory(
+                    RouteFacilityLaunchSearchText(type.Name, type.ID, type.name),
+                    normalized))
+                return true;
+        }
+
+        return RouteFacilityLaunchSearchTextMatchesCategory(RouteFacilityLaunchDescriptorSearchText(descriptor), normalized);
+    }
+
+    private static bool RouteFacilityLaunchSearchTextMatchesCategory(string text, string category)
+    {
+        if (string.IsNullOrWhiteSpace(text) || string.IsNullOrWhiteSpace(category))
+            return false;
+
+        switch (NormalizeRouteFacilityLaunchCategory(category))
+        {
+            case RouteLaunchCategoryMagneticRails:
+                return text.Contains("magnetic launch rail")
+                    || text.Contains("magnetic rail")
+                    || text.Contains("launch rail")
+                    || text.Contains("magrail")
+                    || text.Contains(" rail");
+            case RouteLaunchCategoryLaunchPad:
+                return text.Contains("launch pad")
+                    || text.Contains("launchpad")
+                    || text.Contains(" pad")
+                    || text.Contains("launch facility")
+                    || text.Contains("facility");
+            case RouteLaunchCategoryRotary:
+                return text.Contains("rotary") || text.Contains("spin");
+            case RouteLaunchCategorySpaceElevator:
+                return text.Contains("elevator");
+            case RouteLaunchCategoryElectromagneticCatapult:
+                return text.Contains("electromagnetic") || text.Contains("catapult");
+            case RouteLaunchCategoryMassDriver:
+                return text.Contains("mass driver");
+            default:
+                return false;
+        }
+    }
+
+    private static void AddRouteFacilityLaunchOptionForVehicle(Dictionary<string, RouteFacilityLaunchOptionUi> options, HashSet<int> seen,
+        ObjectInfo source, Company player, ObjectInfoData objectData, LaunchVehicle lv)
+    {
+        if (options == null || seen == null || source == null || player == null || lv?.launchVehicleType == null)
+            return;
+        if (lv.ID > 0 && !seen.Add(lv.ID))
+            return;
+        if (lv.GetCompany() != player || lv.objectInfo != source)
+            return;
+
+        var facility = objectData?.GetFakeLVFromFacilityReverse(lv);
+        var category = GetRouteFacilityLaunchCategory(source, lv, facility);
+        if (facility == null && !string.Equals(category, RouteLaunchCategorySpaceElevator, StringComparison.Ordinal))
+            return;
+        if (!IsRouteFacilityLaunchCategory(category))
+            return;
+
+        if (!options.TryGetValue(category, out var option))
+        {
+            var iconSprite = !string.Equals(category, RouteLaunchCategorySpaceElevator, StringComparison.Ordinal) && facility != null
+                ? RouteFacilityLaunchDescriptorSprite(facility.facilityDescriptor)
+                : null;
+            var icon = RouteFacilityLaunchIconForFacility(facility?.facilityDescriptor, lv.launchVehicleType, category);
+            option = new RouteFacilityLaunchOptionUi
+            {
+                Category = category,
+                IconSprite = iconSprite,
+                Icon = icon,
+                IsAvailable = true
+            };
+            options[category] = option;
+        }
+
+        if (option.IconSprite == null
+            && !string.Equals(category, RouteLaunchCategorySpaceElevator, StringComparison.Ordinal)
+            && facility != null)
+            option.IconSprite = RouteFacilityLaunchDescriptorSprite(facility.facilityDescriptor);
+
+        if (string.IsNullOrWhiteSpace(option.Icon))
+            option.Icon = RouteFacilityLaunchIconForFacility(facility?.facilityDescriptor, lv.launchVehicleType, category);
+
+        option.Count++;
+        var detail = RouteFacilityLaunchDetail(facility, lv);
+        if (!string.IsNullOrWhiteSpace(detail)
+            && !option.Details.Any(existing => string.Equals(existing, detail, StringComparison.OrdinalIgnoreCase)))
+            option.Details.Add(detail);
+    }
+
+    private static string RouteFacilityLaunchDetail(Facility facility, LaunchVehicle lv)
+    {
+        var facilityName = FacilityLaunchDisplayName(facility?.facilityDescriptor);
+        if (!string.IsNullOrWhiteSpace(facilityName))
+            return facilityName;
+
+        return lv?.launchVehicleType?.Name;
+    }
+
+    private static string GetRouteFacilityLaunchCategory(ObjectInfo source, LaunchVehicle lv, Facility facility)
+    {
+        if (facility != null)
+        {
+            var facilityName = FacilityLaunchDisplayName(facility.facilityDescriptor);
+            if (string.IsNullOrWhiteSpace(facilityName))
+                facilityName = facility.GetType().Name;
+            return ClassifyRouteFacilityLaunchCategory(facilityName, lv?.launchVehicleType?.Name ?? "LV");
+        }
+
+        if (source?.IsUseInSpaceElevator == true && source.parentObjectInfo?.LowOrbitCustom != null)
+            return RouteLaunchCategorySpaceElevator;
+
+        return "standard-launch";
+    }
+
+    private static string ClassifyRouteFacilityLaunchCategory(string facilityName, string lvName)
+    {
+        var text = RouteFacilityLaunchSearchText(facilityName, lvName);
+        if (text.Contains("elevator"))
+            return RouteLaunchCategorySpaceElevator;
+        if (text.Contains("rotary") || text.Contains("spin"))
+            return RouteLaunchCategoryRotary;
+        if (text.Contains("launch pad") || text.Contains("launchpad") || text.Contains(" pad"))
+            return RouteLaunchCategoryLaunchPad;
+        if (text.Contains("electromagnetic") || text.Contains("catapult"))
+            return RouteLaunchCategoryElectromagneticCatapult;
+        if (text.Contains("mass driver"))
+            return RouteLaunchCategoryMassDriver;
+        if (text.Contains("magnetic launch rail") || text.Contains("magnetic rail") || text.Contains("launch rail")
+            || text.Contains("magrail") || text.Contains(" rail"))
+            return RouteLaunchCategoryMagneticRails;
+        return RouteLaunchCategoryLaunchPad;
+    }
+
+    private static bool IsRouteFacilityLaunchCategoryEnabled(Data.LogisticsRouteRecord route, string category)
+    {
+        NormalizeRouteFacilityLaunchSettings(route);
+        var normalized = NormalizeRouteFacilityLaunchCategory(category);
+        return route?.disabledFacilityLaunchCategories == null
+            || !route.disabledFacilityLaunchCategories.Any(disabled =>
+                string.Equals(NormalizeRouteFacilityLaunchCategory(disabled), normalized, StringComparison.Ordinal));
+    }
+
+    private static void SetRouteFacilityLaunchCategoryEnabled(Data.LogisticsRouteRecord route, string category, bool enabled)
+    {
+        if (route == null)
+            return;
+
+        NormalizeRouteFacilityLaunchSettings(route);
+        var normalized = NormalizeRouteFacilityLaunchCategory(category);
+        if (!IsRouteFacilityLaunchCategory(normalized))
+            return;
+
+        route.disabledFacilityLaunchCategories ??= new List<string>();
+        route.disabledFacilityLaunchCategories.RemoveAll(disabled =>
+            string.Equals(NormalizeRouteFacilityLaunchCategory(disabled), normalized, StringComparison.Ordinal));
+        if (!enabled)
+            route.disabledFacilityLaunchCategories.Add(normalized);
+    }
+
+    private static void NormalizeRouteFacilityLaunchSettings(Data.LogisticsRouteRecord route)
+    {
+        if (route == null)
+            return;
+
+        route.disabledFacilityLaunchCategories = (route.disabledFacilityLaunchCategories ?? new List<string>())
+            .Select(category => category?.Trim().ToLowerInvariant())
+            .Where(IsRouteFacilityLaunchCategory)
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+    }
+
+    private static bool IsRouteFacilityLaunchCategory(string category)
+    {
+        if (string.IsNullOrWhiteSpace(category))
+            return false;
+
+        var normalized = category.Trim().ToLowerInvariant();
+        return RouteFacilityLaunchCategories.Any(candidate =>
+            string.Equals(candidate, normalized, StringComparison.Ordinal));
+    }
+
+    private static string NormalizeRouteFacilityLaunchCategory(string category)
+    {
+        if (string.IsNullOrWhiteSpace(category))
+            return RouteLaunchCategoryLaunchPad;
+
+        var normalized = category.Trim().ToLowerInvariant();
+        switch (normalized)
+        {
+            case RouteLaunchCategoryMagneticRails:
+            case RouteLaunchCategoryLaunchPad:
+            case RouteLaunchCategoryRotary:
+            case RouteLaunchCategorySpaceElevator:
+            case RouteLaunchCategoryElectromagneticCatapult:
+            case RouteLaunchCategoryMassDriver:
+                return normalized;
+            default:
+                return RouteLaunchCategoryLaunchPad;
+        }
+    }
+
+    private static string RouteFacilityLaunchButtonLabel(string category)
+    {
+        switch (NormalizeRouteFacilityLaunchCategory(category))
+        {
+            case RouteLaunchCategoryMagneticRails:
+                return "Magnetic Rails";
+            case RouteLaunchCategoryLaunchPad:
+                return "Launch Pad";
+            case RouteLaunchCategoryRotary:
+                return "Rotary Launcher";
+            case RouteLaunchCategorySpaceElevator:
+                return "Space Elevator";
+            case RouteLaunchCategoryElectromagneticCatapult:
+                return "EM Catapult";
+            case RouteLaunchCategoryMassDriver:
+                return "Mass Driver";
+            default:
+                return "Launch Pad";
         }
     }
 
     private void ShowRouteLaunchVehicleCountEditor(LogisticsSection section, Data.LogisticsRouteRecord route,
         string typeId, int desiredCount = -1)
     {
+        SetRouteEditorMainPageVisible(false);
         section.ClearContent();
         AddBigButton(section.ContentArea, "\u2190 Back", _runtimeStyle.BackButtonColor, () =>
         {
@@ -2506,6 +4774,7 @@ public class LogisticsUI : MonoBehaviour
 
         if (route == null || string.IsNullOrWhiteSpace(typeId))
         {
+            ClearActiveRouteEditor();
             BuildRoutesSection();
             RebuildSectionLayout(section);
             return;
@@ -2645,6 +4914,7 @@ public class LogisticsUI : MonoBehaviour
 
     private void ShowRouteResourcePicker(LogisticsSection section, Data.LogisticsRouteRecord route)
     {
+        SetRouteEditorMainPageVisible(false);
         section.ClearContent();
         AddBigButton(section.ContentArea, "\u2190 Back", _runtimeStyle.BackButtonColor, () =>
         {
@@ -2676,8 +4946,7 @@ public class LogisticsUI : MonoBehaviour
             if (already)
                 continue;
 
-            var btn = row.AddComponent<Button>();
-            btn.navigation = new Navigation { mode = Navigation.Mode.None };
+            var btn = MakeRowButton(row);
             btn.onClick.AddListener(() =>
             {
                 ShowRouteResourceInput(section, route, captured, -1);
@@ -2690,6 +4959,7 @@ public class LogisticsUI : MonoBehaviour
     private void ShowRouteResourceInput(LogisticsSection section, Data.LogisticsRouteRecord route,
         ResourceDefinition rd, int editIndex)
     {
+        SetRouteEditorMainPageVisible(false);
         section.ClearContent();
         var sourceKeep = 0d;
         var destinationTarget = 0d;
@@ -2747,7 +5017,7 @@ public class LogisticsUI : MonoBehaviour
         {
             var capturedPriority = option;
             var button = AddSmallButton(priorityRow.transform, RoutePriorityLabel(option),
-                option == priority ? _runtimeStyle.ToggleOnColor : _runtimeStyle.ToggleOffColor, () =>
+                _runtimeStyle.ToggleOffColor, () =>
                 {
                     priority = capturedPriority;
                     RefreshResourceOptions();
@@ -2761,6 +5031,7 @@ public class LogisticsUI : MonoBehaviour
         TextMeshProUGUI targetButtonLabel = null;
         Button keepButton = null;
         Button targetButton = null;
+        TextMeshProUGUI amountDisplay = null;
 
         void RefreshModeButtons()
         {
@@ -2774,21 +5045,21 @@ public class LogisticsUI : MonoBehaviour
                 targetButtonLabel.text = $"Target: {FormatNiceAmount(destinationTarget)}";
         }
 
-        keepButton = AddBigButtonInline(editRow.transform, "", _runtimeStyle.ToggleOnColor, () =>
+        keepButton = AddBigButtonInline(editRow.transform, "", _runtimeStyle.ToggleOffColor, () =>
         {
             editingKeep = true;
-            RefreshModeButtons();
+            RefreshAmount();
         });
         keepButtonLabel = keepButton.GetComponentInChildren<TextMeshProUGUI>();
         targetButton = AddBigButtonInline(editRow.transform, "", _runtimeStyle.ToggleOffColor, () =>
         {
             editingKeep = false;
-            RefreshModeButtons();
+            RefreshAmount();
         });
         targetButtonLabel = targetButton.GetComponentInChildren<TextMeshProUGUI>();
 
         var amountRow = MakeHLRow(section.ContentArea, 34f, 0);
-        var amountDisplay = MakeTMP(amountRow.transform, "", 22f, Color.white);
+        amountDisplay = MakeTMP(amountRow.transform, "", 22f, Color.white);
         amountDisplay.alignment = TextAlignmentOptions.Center;
 
         void RefreshAmount()
@@ -2809,21 +5080,7 @@ public class LogisticsUI : MonoBehaviour
         }
 
         RefreshAmount();
-        var plusRow = MakeHLRow(section.ContentArea, 28f, 4);
-        AddSmallButton(plusRow.transform, "+10", _runtimeStyle.SmallButtonPositiveColor, () => AddAmount(10));
-        AddSmallButton(plusRow.transform, "+100", _runtimeStyle.SmallButtonPositiveColor, () => AddAmount(100));
-        AddSmallButton(plusRow.transform, "+1K", _runtimeStyle.SmallButtonPositiveColor, () => AddAmount(1000));
-        AddSmallButton(plusRow.transform, "+10K", _runtimeStyle.SmallButtonPositiveColor, () => AddAmount(10000));
-        AddSmallButton(plusRow.transform, "+100K", _runtimeStyle.SmallButtonPositiveColor, () => AddAmount(100000), 58f);
-        AddSmallButton(plusRow.transform, "+1M", _runtimeStyle.SmallButtonPositiveColor, () => AddAmount(1000000));
-
-        var minusRow = MakeHLRow(section.ContentArea, 28f, 4);
-        AddSmallButton(minusRow.transform, "\u221210", _runtimeStyle.SmallButtonColor, () => AddAmount(-10));
-        AddSmallButton(minusRow.transform, "\u2212100", _runtimeStyle.SmallButtonColor, () => AddAmount(-100));
-        AddSmallButton(minusRow.transform, "\u22121K", _runtimeStyle.SmallButtonColor, () => AddAmount(-1000));
-        AddSmallButton(minusRow.transform, "\u221210K", _runtimeStyle.SmallButtonColor, () => AddAmount(-10000));
-        AddSmallButton(minusRow.transform, "\u2212100K", _runtimeStyle.SmallButtonColor, () => AddAmount(-100000), 58f);
-        AddSmallButton(minusRow.transform, "\u22121M", _runtimeStyle.SmallButtonColor, () => AddAmount(-1000000));
+        AddAmountStepRows(section.ContentArea, AddAmount);
 
         var confirmRow = new GameObject("ConfirmRow", typeof(RectTransform), typeof(HorizontalLayoutGroup), typeof(LayoutElement));
         confirmRow.transform.SetParent(section.ContentArea, false);
@@ -2860,6 +5117,7 @@ public class LogisticsUI : MonoBehaviour
 
     private void ShowRouteShipPicker(LogisticsSection section, Data.LogisticsRouteRecord route, Dictionary<string, int> selectedCounts = null)
     {
+        SetRouteEditorMainPageVisible(false);
         selectedCounts ??= new Dictionary<string, int>();
         section.ClearContent();
         AddBigButton(section.ContentArea, "\u2190 Back", _runtimeStyle.BackButtonColor, () =>
@@ -2869,7 +5127,7 @@ public class LogisticsUI : MonoBehaviour
 
         var source = _currentObjectInfo;
         var player = MonoBehaviourSingleton<GameManager>.Instance?.Player;
-        var adoptable = Object.FindObjectsOfType<Spacecraft>()
+        var adoptable = UnityEngine.Object.FindObjectsOfType<Spacecraft>()
             .Where(sc => Data.LogisticsNetwork.IsSpacecraftAdoptableAt(source, sc, player, out _))
             .ToList();
 
@@ -2943,6 +5201,7 @@ public class LogisticsUI : MonoBehaviour
 
     private void ShowRouteLaunchVehiclePicker(LogisticsSection section, Data.LogisticsRouteRecord route, Dictionary<string, int> selectedCounts = null)
     {
+        SetRouteEditorMainPageVisible(false);
         selectedCounts ??= new Dictionary<string, int>();
         section.ClearContent();
         AddBigButton(section.ContentArea, "\u2190 Back", _runtimeStyle.BackButtonColor, () =>
@@ -3054,9 +5313,7 @@ public class LogisticsUI : MonoBehaviour
                 labelLe.preferredWidth = 0f;
                 if (rd != null)
                 {
-                    var editButton = row.AddComponent<Button>();
-                    editButton.transition = Selectable.Transition.None;
-                    editButton.navigation = new Navigation { mode = Navigation.Mode.None };
+                    var editButton = MakeRowButton(row);
                     editButton.onClick.AddListener(() => ShowAmountInput(_getSection, rd, true, true, idx));
                 }
                 MakeXButton(row.transform, () =>
@@ -3135,9 +5392,7 @@ public class LogisticsUI : MonoBehaviour
                 labelLe.preferredWidth = 0f;
                 if (rd != null)
                 {
-                    var editButton = row.AddComponent<Button>();
-                    editButton.transition = Selectable.Transition.None;
-                    editButton.navigation = new Navigation { mode = Navigation.Mode.None };
+                    var editButton = MakeRowButton(row);
                     editButton.onClick.AddListener(() => ShowAmountInput(_sendSection, rd, false, true, idx));
                 }
                 MakeXButton(row.transform, () =>
@@ -3176,8 +5431,7 @@ public class LogisticsUI : MonoBehaviour
 
         var flightsSection = CreateInlineSection(section.ContentArea, "FLIGHTS", "Route Traffic");
         AddGhostFlightTableHeader(flightsSection);
-        foreach (var flight in ghostFlights)
-            AddGhostFlightTableRow(flightsSection, flight);
+        AddVirtualGhostFlightTableRows(flightsSection, ghostFlights);
     }
 
     private void AddGhostFlightTableHeader(LogisticsSection section)
@@ -3186,18 +5440,39 @@ public class LogisticsUI : MonoBehaviour
         row.GetComponent<Image>().color = WithAlpha(BorderColor, 0.58f);
         AddTableCell(row.transform, "Ships", 68f, 11f, TertiaryTextColor);
         AddTableCell(row.transform, "Lane", 0f, 11f, TertiaryTextColor, TextAlignmentOptions.MidlineLeft, true, false);
+        AddTableCell(row.transform, "Fuel", 86f, 11f, TertiaryTextColor, TextAlignmentOptions.MidlineRight);
         AddTableCell(row.transform, "Arrives", 82f, 11f, TertiaryTextColor, TextAlignmentOptions.MidlineRight);
     }
 
     private void AddGhostFlightTableRow(LogisticsSection section, Data.GhostFlightRecord flight)
     {
-        var row = MakeVLRow(section.ContentArea, 46f, 0f);
+        var row = MakeVLRow(section.ContentArea, GhostFlightRowHeight, 0f);
+        PopulateGhostFlightTableRow(row, flight);
+    }
+
+    private void AddVirtualGhostFlightTableRows(LogisticsSection section, List<Data.GhostFlightRecord> flights)
+    {
+        if (section == null || flights == null || flights.Count == 0)
+            return;
+
+        AddVirtualFixedList(section.ContentArea, "GhostFlightVirtualList", flights.Count, GhostFlightRowHeight,
+            (parent, height) => MakeVirtualVLRow(parent, height, 0f),
+            (row, index) => PopulateGhostFlightTableRow(row, flights[index]));
+    }
+
+    private void PopulateGhostFlightTableRow(GameObject row, Data.GhostFlightRecord flight)
+    {
+        if (row == null || flight == null)
+            return;
+
         row.GetComponent<Image>().color = RowBgMutedColor;
 
         var topLine = MakeHLContainer(row.transform, 22f, 4f);
         AddTableCell(topLine.transform, GhostFlightCraftName(flight), 68f, 12f, SecondaryTextColor);
         AddTableCell(topLine.transform, CompactRouteLane(flight.fromObjectId, flight.toObjectId), 0f, 12f,
             PrimaryTextColor, TextAlignmentOptions.MidlineLeft, true, false);
+        AddTableCell(topLine.transform, BuildGhostFlightFuelLabel(flight), 86f, 11.5f, SecondaryTextColor,
+            TextAlignmentOptions.MidlineRight);
         AddTableCell(topLine.transform, flight.arrivalDate.ToString("yyyy.MM.dd"), 82f, 12f, TertiaryTextColor,
             TextAlignmentOptions.MidlineRight);
 
@@ -3214,8 +5489,23 @@ public class LogisticsUI : MonoBehaviour
     {
         var craft = GhostFlightCraftName(flight);
         var cargo = BuildGhostFlightCargoLabel(flight);
-        var routeLine = $"{craft}: {CompactRouteLane(flight.fromObjectId, flight.toObjectId)}  {flight.arrivalDate:yyyy.MM.dd}";
+        var fuel = BuildGhostFlightFuelLabel(flight);
+        var fuelPart = string.IsNullOrWhiteSpace(fuel) ? "" : $"  {fuel}";
+        var routeLine = $"{craft}: {CompactRouteLane(flight.fromObjectId, flight.toObjectId)}{fuelPart}  {flight.arrivalDate:yyyy.MM.dd}";
         return string.IsNullOrWhiteSpace(cargo) ? $"{routeLine}\n<alpha=#00>.</alpha>" : $"{routeLine}\n{cargo}";
+    }
+
+    private static string BuildGhostFlightFuelLabel(Data.GhostFlightRecord flight)
+    {
+        if (flight == null)
+            return "";
+
+        var fuel = Math.Max(0, flight.outboundFuel);
+        if (fuel <= 0.001)
+            return "";
+
+        var rd = ResolveResource(flight.fuelResourceId);
+        return $"{CompactResourceLabel(rd, flight.fuelResourceId)}x{FormatNiceAmount(fuel)}";
     }
 
     private static string BuildGhostFlightCargoLabel(Data.GhostFlightRecord flight)
@@ -3296,8 +5586,7 @@ public class LogisticsUI : MonoBehaviour
             var label = isAvailable ? ResourceLabel(rd) : $"{ResourceLabel(rd)} (not available)";
             MakeTMP(row.transform, label, 13, color);
 
-            var btn = row.AddComponent<Button>();
-            btn.navigation = new Navigation { mode = Navigation.Mode.None };
+            var btn = MakeRowButton(row);
             btn.onClick.AddListener(() =>
             {
                 ShowAmountInput(sectionRef, rdCaptured, isGetCaptured, isAvailable);
@@ -3474,21 +5763,7 @@ public class LogisticsUI : MonoBehaviour
             UpdateAmountDisplay();
         }
 
-        var plusRow = MakeHLRow(section.ContentArea, 28f, 4);
-        AddSmallButton(plusRow.transform, "+10", _runtimeStyle.SmallButtonPositiveColor, () => AddAmount(10));
-        AddSmallButton(plusRow.transform, "+100", _runtimeStyle.SmallButtonPositiveColor, () => AddAmount(100));
-        AddSmallButton(plusRow.transform, "+1K", _runtimeStyle.SmallButtonPositiveColor, () => AddAmount(1000));
-        AddSmallButton(plusRow.transform, "+10K", _runtimeStyle.SmallButtonPositiveColor, () => AddAmount(10000));
-        AddSmallButton(plusRow.transform, "+100K", _runtimeStyle.SmallButtonPositiveColor, () => AddAmount(100000), 58f);
-        AddSmallButton(plusRow.transform, "+1M", _runtimeStyle.SmallButtonPositiveColor, () => AddAmount(1000000));
-
-        var minusRow = MakeHLRow(section.ContentArea, 28f, 4);
-        AddSmallButton(minusRow.transform, "\u221210", _runtimeStyle.SmallButtonColor, () => AddAmount(-10));
-        AddSmallButton(minusRow.transform, "\u2212100", _runtimeStyle.SmallButtonColor, () => AddAmount(-100));
-        AddSmallButton(minusRow.transform, "\u22121K", _runtimeStyle.SmallButtonColor, () => AddAmount(-1000));
-        AddSmallButton(minusRow.transform, "\u221210K", _runtimeStyle.SmallButtonColor, () => AddAmount(-10000));
-        AddSmallButton(minusRow.transform, "\u2212100K", _runtimeStyle.SmallButtonColor, () => AddAmount(-100000), 58f);
-        AddSmallButton(minusRow.transform, "\u22121M", _runtimeStyle.SmallButtonColor, () => AddAmount(-1000000));
+        AddAmountStepRows(section.ContentArea, AddAmount);
 
         void DoConfirm()
         {
@@ -3563,7 +5838,9 @@ public class LogisticsUI : MonoBehaviour
         var le = row.GetComponent<LayoutElement>();
         le.minHeight = minHeight;
         le.flexibleWidth = 1f;
-        row.GetComponent<Image>().color = _runtimeStyle.RowBackgroundColor;
+        var image = row.GetComponent<Image>();
+        image.color = _runtimeStyle.RowBackgroundColor;
+        image.raycastTarget = false;
         var vlg = row.GetComponent<VerticalLayoutGroup>();
         vlg.childForceExpandWidth = true;
         vlg.childForceExpandHeight = false;
@@ -3575,6 +5852,76 @@ public class LogisticsUI : MonoBehaviour
         var fitter = row.GetComponent<ContentSizeFitter>();
         fitter.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
         fitter.horizontalFit = ContentSizeFitter.FitMode.Unconstrained;
+        return row;
+    }
+
+    private void AddVirtualFixedList(Transform parent, string name, int count, float rowHeight,
+        Func<Transform, float, GameObject> createRow, Action<GameObject, int> bindRow)
+    {
+        if (parent == null || count <= 0 || createRow == null || bindRow == null)
+            return;
+
+        if (_popupScroll == null || _popupScroll.viewport == null)
+        {
+            for (var index = 0; index < count; index++)
+            {
+                var row = createRow(parent, rowHeight);
+                bindRow(row, index);
+            }
+            return;
+        }
+
+        var listGo = new GameObject(name, typeof(RectTransform), typeof(LayoutElement), typeof(VirtualFixedList));
+        listGo.transform.SetParent(parent, false);
+        var rt = listGo.GetComponent<RectTransform>();
+        rt.anchorMin = new Vector2(0f, 1f);
+        rt.anchorMax = new Vector2(1f, 1f);
+        rt.pivot = new Vector2(0.5f, 1f);
+        rt.sizeDelta = new Vector2(0f, count * rowHeight);
+
+        var layout = listGo.GetComponent<LayoutElement>();
+        layout.minHeight = count * rowHeight;
+        layout.preferredHeight = layout.minHeight;
+        layout.flexibleWidth = 1f;
+        layout.flexibleHeight = 0f;
+
+        listGo.GetComponent<VirtualFixedList>().Configure(_popupScroll, count, rowHeight, createRow, bindRow,
+            VirtualListBufferRows);
+    }
+
+    private GameObject MakeVirtualHLRow(Transform parent, float height, float spacing)
+    {
+        var row = new GameObject("VirtualHLRow", typeof(RectTransform), typeof(HorizontalLayoutGroup), typeof(Image));
+        row.transform.SetParent(parent, false);
+        var image = row.GetComponent<Image>();
+        image.color = _runtimeStyle.RowBackgroundColor;
+        image.raycastTarget = false;
+        var hlg = row.GetComponent<HorizontalLayoutGroup>();
+        hlg.childForceExpandWidth = false;
+        hlg.childForceExpandHeight = false;
+        hlg.childControlWidth = true;
+        hlg.childControlHeight = true;
+        hlg.childAlignment = TextAnchor.MiddleLeft;
+        hlg.spacing = spacing;
+        hlg.padding = new RectOffset(8, 8, 4, 4);
+        return row;
+    }
+
+    private GameObject MakeVirtualVLRow(Transform parent, float height, float spacing)
+    {
+        var row = new GameObject("VirtualVLRow", typeof(RectTransform), typeof(VerticalLayoutGroup), typeof(Image));
+        row.transform.SetParent(parent, false);
+        var image = row.GetComponent<Image>();
+        image.color = _runtimeStyle.RowBackgroundColor;
+        image.raycastTarget = false;
+        var vlg = row.GetComponent<VerticalLayoutGroup>();
+        vlg.childForceExpandWidth = true;
+        vlg.childForceExpandHeight = false;
+        vlg.childControlWidth = true;
+        vlg.childControlHeight = true;
+        vlg.childAlignment = TextAnchor.UpperLeft;
+        vlg.spacing = spacing;
+        vlg.padding = new RectOffset(8, 8, 4, 4);
         return row;
     }
 
@@ -3604,7 +5951,9 @@ public class LogisticsUI : MonoBehaviour
         row.transform.SetParent(parent, false);
         var le = row.GetComponent<LayoutElement>();
         le.minHeight = height;
-        row.GetComponent<Image>().color = _runtimeStyle.RowBackgroundColor;
+        var image = row.GetComponent<Image>();
+        image.color = _runtimeStyle.RowBackgroundColor;
+        image.raycastTarget = false;
         var hlg = row.GetComponent<HorizontalLayoutGroup>();
         hlg.childForceExpandWidth = false; hlg.childForceExpandHeight = false;
         hlg.childControlWidth = true; hlg.childControlHeight = true;
@@ -3615,6 +5964,23 @@ public class LogisticsUI : MonoBehaviour
         fitter.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
         fitter.horizontalFit = ContentSizeFitter.FitMode.Unconstrained;
         return row;
+    }
+
+    private Button MakeRowButton(GameObject row)
+    {
+        if (row == null)
+            return null;
+
+        var image = row.GetComponent<Image>();
+        if (image != null)
+            image.raycastTarget = true;
+
+        var button = row.GetComponent<Button>() ?? row.AddComponent<Button>();
+        button.transition = Selectable.Transition.None;
+        button.navigation = new Navigation { mode = Navigation.Mode.None };
+        if (image != null)
+            button.targetGraphic = image;
+        return button;
     }
 
     private TextMeshProUGUI AddTableCell(Transform parent, string text, float width, float fontSize, Color color,
@@ -3751,6 +6117,58 @@ public class LogisticsUI : MonoBehaviour
         layout.flexibleWidth = 0f;
     }
 
+    private static void ClearChildren(Transform parent)
+    {
+        if (parent == null)
+            return;
+
+        var children = new List<GameObject>();
+        foreach (Transform child in parent)
+            children.Add(child.gameObject);
+        foreach (var child in children)
+            DestroyImmediate(child);
+    }
+
+    private Button AddObjectSwitchButton(Transform parent, ObjectInfo target, UnityEngine.Events.UnityAction onClick)
+    {
+        var btnGo = new GameObject("ObjectSwitchBtn", typeof(RectTransform), typeof(Image), typeof(Button), typeof(LayoutElement));
+        btnGo.transform.SetParent(parent, false);
+
+        var layout = btnGo.GetComponent<LayoutElement>();
+        layout.minWidth = 24f;
+        layout.preferredWidth = 24f;
+        layout.minHeight = 24f;
+        layout.preferredHeight = 24f;
+        layout.flexibleWidth = 0f;
+        layout.flexibleHeight = 0f;
+
+        var image = btnGo.GetComponent<Image>();
+        image.color = WithAlpha(VoidColor, 0.96f);
+        image.raycastTarget = true;
+
+        var button = btnGo.GetComponent<Button>();
+        button.transition = Selectable.Transition.None;
+        button.navigation = new Navigation { mode = Navigation.Mode.None };
+        button.targetGraphic = image;
+
+        var icon = AddObjectIcon(btnGo.transform, target, 19f);
+        if (icon != null)
+        {
+            var iconRt = icon.rectTransform;
+            iconRt.anchorMin = new Vector2(0.5f, 0.5f);
+            iconRt.anchorMax = new Vector2(0.5f, 0.5f);
+            iconRt.pivot = new Vector2(0.5f, 0.5f);
+            iconRt.anchoredPosition = Vector2.zero;
+            iconRt.sizeDelta = new Vector2(19f, 19f);
+        }
+
+        ApplyButtonVisual(button, ObjectSwitchButtonStyle());
+        var tooltip = btnGo.AddComponent<SmallHoverTooltip>();
+        tooltip.Configure(SwitchTooltipName(target), _font, _popupRoot != null ? _popupRoot.GetComponent<RectTransform>() : null);
+        button.onClick.AddListener(onClick);
+        return button;
+    }
+
     private void MakeXButton(Transform parent, UnityEngine.Events.UnityAction onClick)
     {
         var btnGo = new GameObject("XBtn", typeof(RectTransform), typeof(Image), typeof(Button), typeof(LayoutElement));
@@ -3802,6 +6220,48 @@ public class LogisticsUI : MonoBehaviour
 
         btn.onClick.AddListener(onClick);
         return btn;
+    }
+
+    private void AddAmountStepRows(Transform parent, System.Action<double> addAmount)
+    {
+        if (parent == null || addAmount == null)
+            return;
+
+        AddAmountStepRow(parent, _runtimeStyle.SmallButtonPositiveColor, addAmount, new (string Label, double Delta, float Width)[]
+        {
+            ("+10", 10, 46f),
+            ("+100", 100, 46f),
+            ("+1K", 1000, 46f),
+            ("+10K", 10000, 46f),
+            ("+100K", 100000, 58f),
+            ("+1M", 1000000, 46f),
+            ("+10M", 10000000, 54f),
+            ("+100M", 100000000, 62f),
+            ("+1B", 1000000000, 46f)
+        });
+        AddAmountStepRow(parent, _runtimeStyle.SmallButtonColor, addAmount, new (string Label, double Delta, float Width)[]
+        {
+            ("\u221210", -10, 46f),
+            ("\u2212100", -100, 46f),
+            ("\u22121K", -1000, 46f),
+            ("\u221210K", -10000, 46f),
+            ("\u2212100K", -100000, 58f),
+            ("\u22121M", -1000000, 46f),
+            ("\u221210M", -10000000, 54f),
+            ("\u2212100M", -100000000, 62f),
+            ("\u22121B", -1000000000, 46f)
+        });
+    }
+
+    private void AddAmountStepRow(Transform parent, Color color, System.Action<double> addAmount,
+        IEnumerable<(string Label, double Delta, float Width)> steps)
+    {
+        var row = MakeHLRow(parent, 28f, 4);
+        foreach (var step in steps)
+        {
+            var delta = step.Delta;
+            AddSmallButton(row.transform, step.Label, color, () => addAmount(delta), step.Width);
+        }
     }
 
     private Button AddSmallButton(Transform parent, string text, Color color, UnityEngine.Events.UnityAction onClick, float width = 46f)
@@ -3856,6 +6316,26 @@ public class LogisticsUI : MonoBehaviour
         return ButtonStyle(ResolveButtonTone(semanticColor, text));
     }
 
+    private static ButtonVisualStyle ObjectSwitchButtonStyle()
+    {
+        return new ButtonVisualStyle
+        {
+            HasBorder = false,
+            NormalFill = WithAlpha(VoidColor, 0.96f),
+            HoverFill = WithAlpha(HoverColor, 0.62f),
+            PressedFill = WithAlpha(BorderColor, 0.94f),
+            SelectedFill = WithAlpha(CardColor, 0.96f),
+            NormalBorder = new Color(0f, 0f, 0f, 0f),
+            HoverBorder = new Color(0f, 0f, 0f, 0f),
+            PressedBorder = new Color(0f, 0f, 0f, 0f),
+            SelectedBorder = new Color(0f, 0f, 0f, 0f),
+            NormalText = PrimaryTextColor,
+            HoverText = PrimaryTextColor,
+            PressedText = PrimaryTextColor,
+            SelectedText = PrimaryTextColor
+        };
+    }
+
     private static ButtonTone ResolveButtonTone(Color semanticColor, string text = null)
     {
         if (SameColor(semanticColor, RemoveButtonColor))
@@ -3868,6 +6348,8 @@ public class LogisticsUI : MonoBehaviour
             return ButtonTone.Positive;
         if (SameColor(semanticColor, ToggleOffRowColor))
             return ButtonTone.Neutral;
+        if (SameColor(semanticColor, WarningColor))
+            return ButtonTone.Warning;
         if (SameColor(semanticColor, AccentButtonColor))
             return ButtonTone.Neutral;
         if (SameColor(semanticColor, BackButtonColor))
@@ -3981,10 +6463,18 @@ public class LogisticsUI : MonoBehaviour
                 style.SelectedText = PrimaryTextColor;
                 break;
             case ButtonTone.Warning:
-                style.NormalFill = WithAlpha(HoverColor, 0.16f);
-                style.NormalBorder = WithAlpha(TertiaryTextColor, 0.78f);
-                style.NormalText = SecondaryTextColor;
-                style.PressedFill = WithAlpha(HoverColor, 0.72f);
+                style.NormalFill = WithAlpha(WarningColor, 0.08f);
+                style.HoverFill = WithAlpha(WarningColor, 0.2f);
+                style.PressedFill = WithAlpha(WarningColor, 0.34f);
+                style.SelectedFill = WithAlpha(WarningColor, 0.24f);
+                style.NormalBorder = WithAlpha(WarningColor, 0.76f);
+                style.HoverBorder = WarningColor;
+                style.PressedBorder = WarningColor;
+                style.SelectedBorder = WarningColor;
+                style.NormalText = WarningColor;
+                style.HoverText = PrimaryTextColor;
+                style.PressedText = PrimaryTextColor;
+                style.SelectedText = PrimaryTextColor;
                 break;
             case ButtonTone.Destructive:
                 style.HasBorder = false;
@@ -4022,7 +6512,7 @@ public class LogisticsUI : MonoBehaviour
         var visual = button.GetComponent<ThemedButtonVisual>();
         if (visual != null)
         {
-            visual.SetSelected(selected);
+            visual.Configure(ButtonStyle(ButtonTone.Neutral), selected);
             return;
         }
 
@@ -4046,7 +6536,7 @@ public class LogisticsUI : MonoBehaviour
     private static void AddBorderSegment(Transform parent, string name, Color color,
         Vector2 anchorMin, Vector2 anchorMax, Vector2 pivot, Vector2 sizeDelta)
     {
-        var border = new GameObject(name, typeof(RectTransform), typeof(Image));
+        var border = new GameObject(name, typeof(RectTransform), typeof(Image), typeof(LayoutElement));
         border.transform.SetParent(parent, false);
         var rt = border.GetComponent<RectTransform>();
         rt.anchorMin = anchorMin;
@@ -4054,6 +6544,7 @@ public class LogisticsUI : MonoBehaviour
         rt.pivot = pivot;
         rt.anchoredPosition = Vector2.zero;
         rt.sizeDelta = sizeDelta;
+        border.GetComponent<LayoutElement>().ignoreLayout = true;
         var image = border.GetComponent<Image>();
         image.color = color;
         image.raycastTarget = false;
@@ -4093,6 +6584,7 @@ public class LogisticsUI : MonoBehaviour
         var tmp = go.GetComponent<TextMeshProUGUI>();
         tmp.text = text; tmp.font = _font; tmp.fontSize = fontSize; tmp.color = color;
         tmp.richText = true;
+        tmp.raycastTarget = false;
         return tmp;
     }
 
@@ -4135,7 +6627,10 @@ public class LogisticsUI : MonoBehaviour
 
     private static string FormatNiceAmount(double amount)
     {
-        return amount.ToString("#,0.#", System.Globalization.CultureInfo.InvariantCulture);
+        if (double.IsNaN(amount) || double.IsInfinity(amount))
+            return amount.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+        return amount.ToPostfixString("{0}{1}T", gray: false, intFormat: false, minPostFixIndex: 0, colorFmt: "{0}");
     }
 
     private static int GetSpacecraftStackClickStep()
@@ -4202,7 +6697,7 @@ public class LogisticsUI : MonoBehaviour
     {
         if (string.IsNullOrWhiteSpace(typeId)) return "?";
         var type = SerializedMonoBehaviourSingleton<AllScriptableObjectManager>.Instance?.AllSpacecraftType?.GetByID(typeId);
-        return type?.NameRocketType ?? typeId;
+        return NormalizeAssetDisplayName(type?.NameRocketType ?? typeId);
     }
 
     private static string LaunchVehicleTypeName(string typeId)
@@ -4224,7 +6719,7 @@ public class LogisticsUI : MonoBehaviour
     {
         if (string.IsNullOrWhiteSpace(typeId)) return "?";
         var type = SerializedMonoBehaviourSingleton<AllScriptableObjectManager>.Instance?.AllLaunchVehicleType?.GetByID(typeId);
-        return type?.Name ?? typeId;
+        return NormalizeAssetDisplayName(type?.Name ?? typeId);
     }
 
     private static string GhostFlightCraftName(Data.GhostFlightRecord flight)
@@ -4314,6 +6809,32 @@ public class LogisticsUI : MonoBehaviour
         return NormalizeObjectDisplayName(name);
     }
 
+    private static string SwitchTooltipName(ObjectInfo oi)
+    {
+        if (oi == null)
+            return "?";
+
+        var name = oi.ObjectName ?? "";
+        int orbitIndex;
+        while ((orbitIndex = name.IndexOf("[ORBIT]", System.StringComparison.OrdinalIgnoreCase)) >= 0)
+            name = (name.Substring(0, orbitIndex) + " Orbit " + name.Substring(orbitIndex + "[ORBIT]".Length)).Trim();
+
+        while (name.Contains("  "))
+            name = name.Replace("  ", " ");
+
+        name = NormalizeObjectDisplayName(name);
+        var isOrbit = oi.objectTypes == global::Data.EObjectTypes.Orbit
+            || oi.objectTypes == global::Data.EObjectTypes.SolarOrbit;
+
+        if (isOrbit && name.IndexOf("orbit", System.StringComparison.OrdinalIgnoreCase) < 0)
+        {
+            var bodyName = oi.parentObjectInfo != null ? CompactObjectName(oi.parentObjectInfo) : CompactObjectName(oi);
+            name = string.IsNullOrWhiteSpace(bodyName) || bodyName == "?" ? "Orbit" : $"{bodyName} Orbit";
+        }
+
+        return string.IsNullOrWhiteSpace(name) ? "?" : name;
+    }
+
     private static string NormalizeObjectDisplayName(string name)
     {
         if (string.IsNullOrWhiteSpace(name))
@@ -4322,6 +6843,25 @@ public class LogisticsUI : MonoBehaviour
         var hasLetter = name.Any(char.IsLetter);
         var hasLower = name.Any(char.IsLower);
         if (!hasLetter || hasLower)
+            return name;
+
+        var lower = name.ToLowerInvariant();
+        return System.Globalization.CultureInfo.InvariantCulture.TextInfo.ToTitleCase(lower);
+    }
+
+    private static string NormalizeAssetDisplayName(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+            return "?";
+
+        name = name.Trim();
+        var hasLetter = name.Any(char.IsLetter);
+        var hasLower = name.Any(char.IsLower);
+        if (!hasLetter || hasLower)
+            return name;
+
+        var letterCount = name.Count(char.IsLetter);
+        if (letterCount <= 3)
             return name;
 
         var lower = name.ToLowerInvariant();
