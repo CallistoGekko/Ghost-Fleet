@@ -76,6 +76,17 @@ internal static class UIManagerEscapePatch
     }
 }
 
+[HarmonyPatch(typeof(UIManager), "Open")]
+internal static class UIManagerLogisticsPopupLayerPatch
+{
+    [HarmonyPostfix]
+    private static void OpenPostfix()
+    {
+        if (UI.LogisticsUI.AnyPopupOpen)
+            UI.LogisticsUI.PlaceOpenPopupsOnWindowLayer();
+    }
+}
+
 [HarmonyPatch(typeof(PauseScreen), "Update")]
 internal static class PauseScreenEscapePatch
 {

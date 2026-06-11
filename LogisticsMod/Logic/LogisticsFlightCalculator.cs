@@ -1,11 +1,8 @@
 using System;
 using System.Collections.Generic;
-using System.Globalization;
-using System.Reflection;
 using Data.ScriptableObject;
 using Game;
 using Game.Info;
-using Game.UI.Windows.Elements.PlanMissionElements;
 using Manager;
 using ScriptableObjectScripts;
 using UnityEngine;
@@ -88,20 +85,57 @@ internal static class LogisticsFlightCalculator
 {
     private const double DefaultEarthMoonTravelDays = 7.0;
     private const double DefaultEarthMoonDeltaV = 3.2;
+    private const double GravitationalConstant = 6.674080038626684E-11;
     private const double AstronomicalUnitMeters = 149599993856.0;
-    private const int PorkchopIntervals = 200;
-    private static readonly MethodInfo ComputeLambert2Method = typeof(LambertPorkchop).GetMethod(
-        "ComputeLambert2",
-        BindingFlags.NonPublic | BindingFlags.Static);
-    private static readonly Dictionary<string, InstantPorkchopCacheEntry> InstantPorkchopCache =
-        new Dictionary<string, InstantPorkchopCacheEntry>(StringComparer.Ordinal);
+    private const double MetersPerKilometer = 1000.0;
+    private const double TwoPi = Math.PI * 2.0;
+    private const double RadiansPerDegree = Math.PI / 180.0;
+    private const double FastHighEnergyExponent = 1.55;
+    private const double FastRouteMinimumTransferFactor = 0.55;
+    private const double TransferWindowNowToleranceRadians = 10.0 * RadiansPerDegree;
+    private static readonly double[] FastTransferFactors = { 0.85, 0.70, 0.55 };
 
-    private sealed class InstantPorkchopCacheEntry
+    private readonly struct LogisticsFlightTimingPlan
     {
-        public double DeltaV;
-        public double TravelDays;
-        public DateTime Departure;
-        public DateTime Arrival;
+        public LogisticsFlightTimingPlan(double departureDelayDays, double travelDays, double deltaV)
+        {
+            DepartureDelayDays = Math.Max(0.0, departureDelayDays);
+            TravelDays = Math.Max(0.1, travelDays);
+            DeltaV = Math.Max(0.0, deltaV);
+        }
+
+        public double DepartureDelayDays { get; }
+        public double TravelDays { get; }
+        public double DeltaV { get; }
+    }
+
+    private readonly struct LogisticsTransferWindowState
+    {
+        public LogisticsTransferWindowState(
+            double departureDelayDays,
+            double phaseErrorRadians,
+            double synodicDays,
+            double sourceAngleRadians,
+            double targetAngleRadians,
+            double targetAngularVelocityRadiansPerPhysicsSecond,
+            double targetOrbitRadiusMeters)
+        {
+            DepartureDelayDays = Math.Max(0.0, departureDelayDays);
+            PhaseErrorRadians = phaseErrorRadians;
+            SynodicDays = Math.Max(0.0, synodicDays);
+            SourceAngleRadians = sourceAngleRadians;
+            TargetAngleRadians = targetAngleRadians;
+            TargetAngularVelocityRadiansPerPhysicsSecond = targetAngularVelocityRadiansPerPhysicsSecond;
+            TargetOrbitRadiusMeters = Math.Max(0.0, targetOrbitRadiusMeters);
+        }
+
+        public double DepartureDelayDays { get; }
+        public double PhaseErrorRadians { get; }
+        public double SynodicDays { get; }
+        public double SourceAngleRadians { get; }
+        public double TargetAngleRadians { get; }
+        public double TargetAngularVelocityRadiansPerPhysicsSecond { get; }
+        public double TargetOrbitRadiusMeters { get; }
     }
 
     public static LogisticsCalculatedFlight CalculateSoonestOptimalFlight(
@@ -110,7 +144,8 @@ internal static class LogisticsFlightCalculator
         LogisticsFlightVehicleSnapshot vehicle,
         LogisticsFlightCargoSnapshot cargo,
         Company company,
-        LogisticsFlightPlanMode flightPlanMode = LogisticsFlightPlanMode.Optimal)
+        LogisticsFlightPlanMode flightPlanMode = LogisticsFlightPlanMode.Optimal,
+        double maxFlightFuel = double.PositiveInfinity)
     {
         var now = MonoBehaviourSingleton<TimeController>.Instance?.CurrentTime ?? DateTime.Now;
         var result = new LogisticsCalculatedFlight
@@ -140,30 +175,25 @@ internal static class LogisticsFlightCalculator
         var effectiveFlightPlanMode = ResolveEffectiveFlightPlanMode(vehicle.Type, flightPlanMode);
         result.RouteKind = ClassifyRoute(start, target, vehicle);
         result.FlightPlanMode = effectiveFlightPlanMode;
-        var travelDays = EstimateSoonestOptimalTravelDays(start, target, vehicle, cargo, company, result.RouteKind);
-        var deltaV = EstimateOptimalDeltaV(start, target, vehicle, result.RouteKind);
-        var departure = now;
-        var arrival = now.AddDays(Math.Max(0.1, travelDays));
-        if (TryCalculateInstantPorkchop(start, target, vehicle, cargo, company, effectiveFlightPlanMode,
-                out var porkchopDeltaV, out var porkchopTravelDays, out var porkchopDeparture, out var porkchopArrival))
-        {
-            deltaV = porkchopDeltaV;
-            travelDays = porkchopTravelDays;
-            departure = porkchopDeparture;
-            arrival = porkchopArrival;
-        }
+        var timingPlan = EstimateFlightTimingPlan(start, target, vehicle, cargo, company, result.RouteKind,
+            effectiveFlightPlanMode, maxFlightFuel);
+        var departure = now.AddDays(Math.Max(0.0, timingPlan.DepartureDelayDays));
+        var arrival = departure.AddDays(Math.Max(0.1, timingPlan.TravelDays));
 
         result.TravelDays = Math.Max(0.1, (arrival - departure).TotalDays);
         result.Departure = departure;
         result.Arrival = arrival > departure ? arrival : departure.AddDays(result.TravelDays);
-        result.EstimatedDeltaV = deltaV;
+        result.EstimatedDeltaV = timingPlan.DeltaV;
         result.AvailableDeltaV = EstimateAvailableDeltaV(vehicle, cargo, company);
         result.FlightFuel = EstimateFlightFuel(vehicle, cargo, company, result.EstimatedDeltaV, result.RouteKind);
         result.LaunchFuel = 0.0;
 
-        if (!vehicle.SolarPowered && vehicle.FuelCapacity > 0.001 && result.FlightFuel > vehicle.FuelCapacity + 0.001)
+        var flightFuelBudget = GetEffectiveFlightFuelBudget(vehicle, maxFlightFuel);
+        if (!vehicle.SolarPowered && result.FlightFuel > flightFuelBudget + 0.001)
         {
-            result.Reason = "Flight fuel exceeds tank capacity";
+            result.Reason = flightFuelBudget + 0.001 < Math.Max(0.0, vehicle.FuelCapacity)
+                ? "Flight fuel exceeds reserved tank budget"
+                : "Flight fuel exceeds tank capacity";
             return result;
         }
 
@@ -236,20 +266,57 @@ internal static class LogisticsFlightCalculator
             case LogisticsFlightRouteKind.EarthMoon:
                 return GetEarthMoonOptimalTravelDays();
             case LogisticsFlightRouteKind.SameParent:
-                if (IsHeliocentricRoute(start, target))
-                    return EstimateFastHeliocentricTravelDays(start, target);
+                if (TryEstimateHohmannDeltaV(start, target, out _, out var sameParentDays))
+                    return sameParentDays;
                 return 20.0;
             case LogisticsFlightRouteKind.ParentChild:
-                if (IsHeliocentricRoute(start, target))
-                    return EstimateFastHeliocentricTravelDays(start, target);
+                if (TryGetMoonCaseDeltaV(start, target, out _))
+                    return GetEarthMoonOptimalTravelDays();
                 return 10.0;
             case LogisticsFlightRouteKind.ConstantAcceleration:
                 if (TryEstimateConstantAccelerationTravelDays(start, target, vehicle, cargo, company, out var constantDays))
                     return constantDays;
                 return EstimateHohmannLikeDays(start, target);
             default:
+                if (TryEstimateHohmannDeltaV(start, target, out _, out var interplanetaryDays))
+                    return interplanetaryDays;
                 return EstimateHohmannLikeDays(start, target);
         }
+    }
+
+    private static LogisticsFlightTimingPlan EstimateFlightTimingPlan(
+        ObjectInfo start,
+        ObjectInfo target,
+        LogisticsFlightVehicleSnapshot vehicle,
+        LogisticsFlightCargoSnapshot cargo,
+        Company company,
+        LogisticsFlightRouteKind routeKind,
+        LogisticsFlightPlanMode flightPlanMode,
+        double maxFlightFuel)
+    {
+        var optimalDays = EstimateSoonestOptimalTravelDays(start, target, vehicle, cargo, company, routeKind);
+        var optimalDeltaV = EstimateOptimalDeltaV(start, target, vehicle, routeKind);
+        var selectedDays = optimalDays;
+        var selectedDeltaV = optimalDeltaV;
+        var departureDelayDays = 0.0;
+        var hasWindow = TryGetTransferWindowState(start, target, routeKind, optimalDays, out var transferWindow);
+
+        if (flightPlanMode != LogisticsFlightPlanMode.Fast || vehicle?.SolarPowered == true)
+        {
+            if (hasWindow)
+                departureDelayDays = transferWindow.DepartureDelayDays;
+            return new LogisticsFlightTimingPlan(departureDelayDays, selectedDays, selectedDeltaV);
+        }
+
+        if (TrySelectFastTransferCandidate(start, target, vehicle, cargo, company, routeKind,
+                optimalDays, selectedDeltaV, maxFlightFuel, hasWindow, transferWindow,
+                out var fastDays, out var fastDeltaV))
+        {
+            selectedDays = fastDays;
+            selectedDeltaV = fastDeltaV;
+        }
+
+        return new LogisticsFlightTimingPlan(0.0, selectedDays, selectedDeltaV);
     }
 
     private static double EstimateOptimalDeltaV(ObjectInfo start, ObjectInfo target, LogisticsFlightVehicleSnapshot vehicle, LogisticsFlightRouteKind routeKind)
@@ -263,18 +330,136 @@ internal static class LogisticsFlightCalculator
             case LogisticsFlightRouteKind.EarthMoon:
                 return EstimateEarthMoonDeltaV(start, target);
             case LogisticsFlightRouteKind.SameParent:
-                if (IsHeliocentricRoute(start, target))
-                    return EstimateFastHeliocentricDeltaV(start, target, EstimateFastHeliocentricTravelDays(start, target));
+                if (TryEstimateHohmannDeltaV(start, target, out var sameParentDeltaV, out _))
+                    return sameParentDeltaV;
                 return 2.5;
             case LogisticsFlightRouteKind.ParentChild:
-                if (IsHeliocentricRoute(start, target))
-                    return EstimateFastHeliocentricDeltaV(start, target, EstimateFastHeliocentricTravelDays(start, target));
+                if (TryGetMoonCaseDeltaV(start, target, out var moonDeltaV))
+                    return moonDeltaV;
                 return 2.0;
             case LogisticsFlightRouteKind.ConstantAcceleration:
                 return Math.Max(1.0, EstimateInterplanetaryDeltaV(start, target) * 0.75);
             default:
+                if (TryEstimateHohmannDeltaV(start, target, out var deltaV, out _))
+                    return deltaV;
                 return EstimateInterplanetaryDeltaV(start, target);
         }
+    }
+
+    private static bool TrySelectFastTransferCandidate(
+        ObjectInfo start,
+        ObjectInfo target,
+        LogisticsFlightVehicleSnapshot vehicle,
+        LogisticsFlightCargoSnapshot cargo,
+        Company company,
+        LogisticsFlightRouteKind routeKind,
+        double optimalDays,
+        double optimalDeltaV,
+        double maxFlightFuel,
+        bool hasTransferWindow,
+        LogisticsTransferWindowState transferWindow,
+        out double selectedDays,
+        out double selectedDeltaV)
+    {
+        selectedDays = optimalDays;
+        selectedDeltaV = optimalDeltaV;
+
+        if (vehicle == null || routeKind == LogisticsFlightRouteKind.SameObject
+            || routeKind == LogisticsFlightRouteKind.LocalOrbit
+            || routeKind == LogisticsFlightRouteKind.EarthMoon
+            || routeKind == LogisticsFlightRouteKind.ConstantAcceleration
+            || optimalDays <= 0.1 || optimalDeltaV <= 0.001)
+        {
+            return false;
+        }
+
+        var availableDeltaV = EstimateAvailableDeltaV(vehicle, cargo, company);
+        var selectedFuel = double.MaxValue;
+        var found = false;
+
+        foreach (var factor in BuildFastTransferFactors(vehicle))
+        {
+            var candidateDays = Clamp(optimalDays * factor, 1.0, Math.Max(1.0, optimalDays));
+            var compressedDeltaV = LogisticsVanillaMissionMath.EstimateHighEnergyDeltaV(
+                optimalDeltaV,
+                optimalDays,
+                candidateDays,
+                FastHighEnergyExponent);
+            var compressionExtraDeltaV = Math.Max(0.0, compressedDeltaV - optimalDeltaV);
+            var badWindowChaseDeltaV = hasTransferWindow
+                ? EstimateBadWindowChaseDeltaV(transferWindow, candidateDays)
+                : 0.0;
+            var candidateDeltaV = Clamp(
+                optimalDeltaV + compressionExtraDeltaV + badWindowChaseDeltaV,
+                optimalDeltaV,
+                120.0);
+            var candidateFuel = EstimateFlightFuelValue(vehicle, cargo, company, candidateDeltaV);
+            if (!IsFeasibleCandidate(vehicle, candidateDeltaV, candidateFuel, availableDeltaV, maxFlightFuel))
+                continue;
+
+            var closeArrival = found && Math.Abs(candidateDays - selectedDays) <= Math.Max(1.0, optimalDays * 0.03);
+            var better = !found
+                || (closeArrival
+                    ? candidateFuel < selectedFuel
+                    : candidateDays < selectedDays);
+            if (!better)
+                continue;
+
+            selectedDays = candidateDays;
+            selectedDeltaV = candidateDeltaV;
+            selectedFuel = candidateFuel;
+            found = true;
+        }
+
+        return found;
+    }
+
+    private static IEnumerable<double> BuildFastTransferFactors(LogisticsFlightVehicleSnapshot vehicle)
+    {
+        var minimumFactor = vehicle?.Type != null
+            ? Clamp(vehicle.Type.MinFlightTimeHohRel, FastRouteMinimumTransferFactor, 0.95)
+            : FastRouteMinimumTransferFactor;
+        yield return 1.0;
+
+        var emittedMinimum = false;
+        foreach (var factor in FastTransferFactors)
+        {
+            if (factor + 0.001 < minimumFactor)
+                continue;
+            if (Math.Abs(factor - minimumFactor) <= 0.001)
+                emittedMinimum = true;
+            yield return factor;
+        }
+
+        if (!emittedMinimum)
+            yield return minimumFactor;
+    }
+
+    private static bool IsFeasibleCandidate(LogisticsFlightVehicleSnapshot vehicle, double deltaV, double fuel,
+        double availableDeltaV, double maxFlightFuel)
+    {
+        if (vehicle == null || deltaV <= 0.001 || double.IsNaN(deltaV) || double.IsInfinity(deltaV))
+            return false;
+        if (vehicle.SolarPowered)
+            return true;
+        if (deltaV > availableDeltaV + 0.001)
+            return false;
+        if (fuel > GetEffectiveFlightFuelBudget(vehicle, maxFlightFuel) + 0.001)
+            return false;
+        return vehicle.FuelCapacity <= 0.001 || fuel <= vehicle.FuelCapacity + 0.001;
+    }
+
+    private static double GetEffectiveFlightFuelBudget(LogisticsFlightVehicleSnapshot vehicle, double maxFlightFuel)
+    {
+        if (vehicle == null || vehicle.SolarPowered)
+            return double.PositiveInfinity;
+
+        var tankBudget = vehicle.FuelCapacity > 0.001
+            ? vehicle.FuelCapacity
+            : double.PositiveInfinity;
+        if (double.IsNaN(maxFlightFuel))
+            return tankBudget;
+        return Math.Min(tankBudget, Math.Max(0.0, maxFlightFuel));
     }
 
     private static double EstimateFlightFuel(
@@ -403,6 +588,9 @@ internal static class LogisticsFlightCalculator
 
     private static double EstimateHohmannLikeDays(ObjectInfo start, ObjectInfo target)
     {
+        if (TryEstimateHohmannDeltaV(start, target, out _, out var hohmannDays))
+            return hohmannDays;
+
         var startBody = GetCanonicalBody(start);
         var targetBody = GetCanonicalBody(target);
         var r1 = Math.Max(0.01, startBody?.DistanceToSunInAU ?? 0.0);
@@ -418,11 +606,289 @@ internal static class LogisticsFlightCalculator
 
     private static double EstimateInterplanetaryDeltaV(ObjectInfo start, ObjectInfo target)
     {
+        if (TryEstimateHohmannDeltaV(start, target, out var deltaV, out _))
+            return deltaV;
+
         var startBody = GetCanonicalBody(start);
         var targetBody = GetCanonicalBody(target);
         var r1 = Math.Max(0.01, startBody?.DistanceToSunInAU ?? 1.0);
         var r2 = Math.Max(0.01, targetBody?.DistanceToSunInAU ?? 1.0);
         return Clamp(3.0 + Math.Abs(r1 - r2) * 6.5, 3.0, 90.0);
+    }
+
+    private static bool TryEstimateHohmannDeltaV(ObjectInfo start, ObjectInfo target, out double deltaV,
+        out double travelDays)
+    {
+        deltaV = 0.0;
+        travelDays = 0.0;
+        if (!TryGetHohmannInputs(start, target, out var r1, out var r2, out var mu))
+            return false;
+
+        var transfer = LogisticsVanillaMissionMath.CalculateHohmannTransfer(r1, r2, mu);
+        var deltaVKmS = transfer.DeltaV / MetersPerKilometer;
+        if (deltaVKmS <= 0.001 || transfer.TravelDays <= 0.001
+            || double.IsNaN(deltaVKmS) || double.IsInfinity(deltaVKmS))
+        {
+            return false;
+        }
+
+        deltaV = Clamp(deltaVKmS, 0.1, 120.0);
+        travelDays = Clamp(transfer.TravelDays, 1.0, 600.0);
+        return true;
+    }
+
+    private static bool TryGetHohmannInputs(ObjectInfo start, ObjectInfo target, out double r1, out double r2,
+        out double mu)
+    {
+        r1 = 0.0;
+        r2 = 0.0;
+        mu = 0.0;
+        var startBody = GetCanonicalBody(start);
+        var targetBody = GetCanonicalBody(target);
+        if (startBody == null || targetBody == null || startBody == targetBody)
+            return false;
+
+        var center = startBody.parentObjectInfo != null && startBody.parentObjectInfo == targetBody.parentObjectInfo
+            ? startBody.parentObjectInfo
+            : null;
+        if (center == null || center.Mass <= 0.0)
+            return false;
+
+        if (!TryGetOrbitalRadiusMeters(startBody, center, out r1)
+            || !TryGetOrbitalRadiusMeters(targetBody, center, out r2))
+        {
+            return false;
+        }
+
+        var larger = Math.Max(r1, r2);
+        if (larger <= 0.0 || Math.Abs(r1 - r2) / larger < 0.001)
+            return false;
+
+        mu = GravitationalConstant * center.Mass;
+        return mu > 0.001;
+    }
+
+    private static bool TryGetTransferWindowState(
+        ObjectInfo start,
+        ObjectInfo target,
+        LogisticsFlightRouteKind routeKind,
+        double transferDays,
+        out LogisticsTransferWindowState state)
+    {
+        state = default;
+        if (!IsTransferWindowRoute(routeKind) || transferDays <= 0.001)
+            return false;
+
+        var startBody = GetCanonicalBody(start);
+        var targetBody = GetCanonicalBody(target);
+        if (startBody == null || targetBody == null || startBody == targetBody
+            || startBody.parentObjectInfo == null
+            || startBody.parentObjectInfo != targetBody.parentObjectInfo)
+        {
+            return false;
+        }
+
+        if (!TryGetHohmannInputs(start, target, out _, out var targetOrbitRadiusMeters, out _))
+            return false;
+
+        var startOrbit = TryGetOrbitUniversal(startBody);
+        var targetOrbit = TryGetOrbitUniversal(targetBody);
+        if (startOrbit == null || targetOrbit == null)
+            return false;
+
+        var startAngularVelocity = TryGetAngularVelocity(startOrbit);
+        var targetAngularVelocity = TryGetAngularVelocity(targetOrbit);
+        var relativeAngularVelocity = targetAngularVelocity - startAngularVelocity;
+        if (Math.Abs(relativeAngularVelocity) <= 1E-12)
+            return false;
+
+        var startAngle = GetCircularPhaseRadians(startOrbit);
+        var targetAngle = GetCircularPhaseRadians(targetOrbit);
+        var currentPhase = WrapPositiveRadians(targetAngle - startAngle);
+        var transferPhysicsSeconds = WorldDaysToPhysicsSeconds(transferDays);
+        if (transferPhysicsSeconds <= 0.001)
+            return false;
+
+        var idealPhase = WrapPositiveRadians(Math.PI - targetAngularVelocity * transferPhysicsSeconds);
+        var phaseError = WrapSignedRadians(currentPhase - idealPhase);
+        var waitPhysicsSeconds = Math.Abs(phaseError) <= TransferWindowNowToleranceRadians
+            ? 0.0
+            : relativeAngularVelocity > 0.0
+                ? WrapPositiveRadians(0.0 - phaseError) / relativeAngularVelocity
+                : WrapPositiveRadians(phaseError) / (0.0 - relativeAngularVelocity);
+        var synodicPhysicsSeconds = TwoPi / Math.Abs(relativeAngularVelocity);
+        if (double.IsNaN(waitPhysicsSeconds) || double.IsInfinity(waitPhysicsSeconds)
+            || double.IsNaN(synodicPhysicsSeconds) || double.IsInfinity(synodicPhysicsSeconds))
+        {
+            return false;
+        }
+
+        var waitDays = Clamp(PhysicsSecondsToWorldDays(waitPhysicsSeconds), 0.0,
+            Math.Max(0.0, PhysicsSecondsToWorldDays(synodicPhysicsSeconds)));
+        var synodicDays = Math.Max(0.0, PhysicsSecondsToWorldDays(synodicPhysicsSeconds));
+        state = new LogisticsTransferWindowState(
+            waitDays,
+            phaseError,
+            synodicDays,
+            startAngle,
+            targetAngle,
+            targetAngularVelocity,
+            targetOrbitRadiusMeters);
+        return true;
+    }
+
+    private static bool IsTransferWindowRoute(LogisticsFlightRouteKind routeKind)
+    {
+        return routeKind == LogisticsFlightRouteKind.SameParent
+            || routeKind == LogisticsFlightRouteKind.Interplanetary;
+    }
+
+    private static double EstimateBadWindowChaseDeltaV(LogisticsTransferWindowState transferWindow,
+        double candidateTravelDays)
+    {
+        var candidatePhysicsSeconds = WorldDaysToPhysicsSeconds(candidateTravelDays);
+        if (candidatePhysicsSeconds <= 0.001)
+            return 0.0;
+
+        var transferArrivalAngle = WrapPositiveRadians(transferWindow.SourceAngleRadians + Math.PI);
+        var targetArrivalAngle = WrapPositiveRadians(
+            transferWindow.TargetAngleRadians
+            + transferWindow.TargetAngularVelocityRadiansPerPhysicsSecond * candidatePhysicsSeconds);
+        var phaseMiss = WrapSignedRadians(targetArrivalAngle - transferArrivalAngle);
+        return LogisticsVanillaMissionMath.CalculateBadWindowChaseDeltaV(
+            transferWindow.TargetOrbitRadiusMeters,
+            phaseMiss,
+            candidateTravelDays);
+    }
+
+    private static OrbitUniversal TryGetOrbitUniversal(ObjectInfo body)
+    {
+        if (body == null)
+            return null;
+
+        try
+        {
+            return body.OrbitUniversal;
+        }
+        catch
+        {
+            try
+            {
+                return body.NBody != null ? body.NBody.GetComponent<OrbitUniversal>() : null;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+    }
+
+    private static double TryGetAngularVelocity(OrbitUniversal orbit)
+    {
+        if (orbit == null)
+            return 0.0;
+
+        try
+        {
+            var angularVelocity = orbit.GetAngularVelocity();
+            if (angularVelocity > 1E-12 && !double.IsNaN(angularVelocity) && !double.IsInfinity(angularVelocity))
+                return angularVelocity;
+        }
+        catch
+        {
+            // Fall through to the period-based estimate below.
+        }
+
+        try
+        {
+            var period = orbit.GetPeriod();
+            if (period > 1E-9 && !double.IsNaN(period) && !double.IsInfinity(period))
+                return TwoPi / period;
+        }
+        catch
+        {
+            return 0.0;
+        }
+
+        return 0.0;
+    }
+
+    private static double GetCircularPhaseRadians(OrbitUniversal orbit)
+    {
+        if (orbit == null)
+            return 0.0;
+
+        try
+        {
+            return WrapPositiveRadians((orbit.GetCurrentPhase() + orbit.omega_lc + orbit.omega_uc) * RadiansPerDegree);
+        }
+        catch
+        {
+            return WrapPositiveRadians((orbit.phase + orbit.omega_lc + orbit.omega_uc) * RadiansPerDegree);
+        }
+    }
+
+    private static double WorldDaysToPhysicsSeconds(double days)
+    {
+        var worldSeconds = Math.Max(0.0, days) * 86400.0;
+        try
+        {
+            return GravityScaler.WorldSecsToPhysTime(worldSeconds);
+        }
+        catch
+        {
+            var scale = GravityScaler.game_sec_per_phys_sec;
+            return scale > 0.0 ? worldSeconds / scale : worldSeconds;
+        }
+    }
+
+    private static double PhysicsSecondsToWorldDays(double physicsSeconds)
+    {
+        physicsSeconds = Math.Max(0.0, physicsSeconds);
+        double worldSeconds;
+        try
+        {
+            worldSeconds = GravityScaler.GetWorldTimeSeconds(physicsSeconds);
+        }
+        catch
+        {
+            var scale = GravityScaler.game_sec_per_phys_sec;
+            worldSeconds = physicsSeconds * (scale > 0.0 ? scale : 1.0);
+        }
+
+        return worldSeconds / 86400.0;
+    }
+
+    private static double WrapPositiveRadians(double radians)
+    {
+        radians %= TwoPi;
+        if (radians < 0.0)
+            radians += TwoPi;
+        return radians;
+    }
+
+    private static double WrapSignedRadians(double radians)
+    {
+        radians = WrapPositiveRadians(radians);
+        return radians > Math.PI ? radians - TwoPi : radians;
+    }
+
+    private static bool TryGetOrbitalRadiusMeters(ObjectInfo body, ObjectInfo center, out double radiusMeters)
+    {
+        radiusMeters = 0.0;
+        if (body == null || center == null)
+            return false;
+
+        var radiusAu = body.DistanceToCentralObjectAu > 0.000001
+            ? body.DistanceToCentralObjectAu
+            : body.parentObjectInfo == center && body.DistanceToSunInAU > 0.000001 && center.DistanceToSunInAU > 0.000001
+                ? Math.Abs(body.DistanceToSunInAU - center.DistanceToSunInAU)
+                : 0.0;
+        if (radiusAu <= 0.000001)
+            return false;
+
+        radiusMeters = radiusAu * AstronomicalUnitMeters;
+        return radiusMeters > 1.0;
     }
 
     private static double EstimateFastHeliocentricDeltaV(ObjectInfo start, ObjectInfo target, double travelDays)
@@ -460,385 +926,7 @@ internal static class LogisticsFlightCalculator
         if (radiusMeters <= 0.0 || parent.Mass <= 0.0)
             return 0.0;
 
-        return Math.Sqrt(6.674080038626684E-11 * parent.Mass / radiusMeters) / 1000.0;
-    }
-
-    private static bool TryCalculateInstantPorkchop(
-        ObjectInfo start,
-        ObjectInfo target,
-        LogisticsFlightVehicleSnapshot vehicle,
-        LogisticsFlightCargoSnapshot cargo,
-        Company company,
-        LogisticsFlightPlanMode flightPlanMode,
-        out double deltaV,
-        out double travelDays,
-        out DateTime departure,
-        out DateTime arrival)
-    {
-        deltaV = 0.0;
-        travelDays = 0.0;
-        departure = default;
-        arrival = default;
-        if (start == null || target == null || vehicle?.Type == null || company == null || ComputeLambert2Method == null)
-        {
-            LogRouteMission(
-                $"step=abort reason=missing-input start={DescribeRouteObject(start)} target={DescribeRouteObject(target)} vehicleType={vehicle?.Type?.ID ?? "null"} company={company?.ToString() ?? "null"} hasLambert={ComputeLambert2Method != null}");
-            return false;
-        }
-        if (vehicle.Type.NotUsePorkchope)
-        {
-            LogRouteMission(
-                $"step=abort reason=not-porkchop start={DescribeRouteObject(start)} target={DescribeRouteObject(target)} ship={vehicle.Type.ID}");
-            return false;
-        }
-
-        try
-        {
-            var missionParameter = new PMMissionParameter()
-                .SetCompany(company)
-                .SetTabDestination(start, target);
-            var calculationStart = missionParameter.ObjectInfoStartCalculation;
-            var calculationTarget = missionParameter.ObjectInfoTargetCalculation;
-            LogRouteMission(
-                $"step=destination start={DescribeRouteObject(start)} target={DescribeRouteObject(target)} calcStart={DescribeRouteObject(calculationStart)} calcTarget={DescribeRouteObject(calculationTarget)} mode={flightPlanMode} ship={vehicle.Type.ID} cargo={cargo?.CargoMass ?? 0.0:0.###} designDV={vehicle.DesignAvailableDeltaV:0.###} effectiveGate={EstimateAvailableDeltaV(vehicle, cargo, company):0.###} minMaxRel={vehicle.Type.MinFlightTimeHohRel:0.###}/{vehicle.Type.MaxFlightTimeHohRel:0.###}");
-            var fromOrbit = calculationStart?.NBody?.gameObject?.GetComponent<OrbitUniversal>();
-            var toOrbit = calculationTarget?.NBody?.gameObject?.GetComponent<OrbitUniversal>();
-            if (fromOrbit == null || toOrbit == null || fromOrbit.centerNbody != toOrbit.centerNbody)
-            {
-                LogRouteMission(
-                    $"step=abort reason=orbit-mismatch startOrbit={fromOrbit != null} targetOrbit={toOrbit != null} sameCenter={fromOrbit != null && toOrbit != null && fromOrbit.centerNbody == toOrbit.centerNbody}");
-                return false;
-            }
-
-            var cacheKey = BuildInstantPorkchopCacheKey(
-                start,
-                target,
-                calculationStart,
-                calculationTarget,
-                vehicle,
-                cargo,
-                company,
-                flightPlanMode);
-            if (TryGetInstantPorkchopCache(cacheKey, out deltaV, out travelDays, out departure, out arrival))
-            {
-                LogRouteMission(
-                    $"step=cache-hit mode={flightPlanMode} start={DescribeRouteObject(start)} target={DescribeRouteObject(target)} dV={deltaV:0.###} days={travelDays:0.###} depart={departure:yyyy-MM-dd} arrive={arrival:yyyy-MM-dd}");
-                return true;
-            }
-
-            var physicalNow = GravityEngine.instance.GetPhysicalTimeDouble();
-            var departureStart = physicalNow;
-            departureStart += GetDefaultPlanMissionLeadTimeSeconds(vehicle);
-
-            var departureWindow = CalculateInstantDepartureWindow(fromOrbit, toOrbit);
-            var departureEnd = departureStart + departureWindow;
-            var arrivalCenter = 0.5 * (toOrbit.GetPeriod() + departureWindow);
-            if (arrivalCenter * Math.Max(0.1, vehicle.Type.MaxFlightTimeHohRel) > 600.0)
-                arrivalCenter = 600.0 / Math.Max(0.1, vehicle.Type.MaxFlightTimeHohRel);
-
-            var minFlightTime = arrivalCenter * Math.Max(0.001, vehicle.Type.MinFlightTimeHohRel);
-            var maxFlightTime = arrivalCenter * Math.Max(vehicle.Type.MinFlightTimeHohRel, vehicle.Type.MaxFlightTimeHohRel);
-            var arrivalStart = departureStart + minFlightTime;
-            var arrivalEnd = departureEnd + maxFlightTime;
-            if (arrivalStart <= departureStart || arrivalStart > arrivalEnd)
-            {
-                LogRouteMission(
-                    $"step=abort reason=bad-window depart={RoutePhysDate(departureStart)}..{RoutePhysDate(departureEnd)} arrival={RoutePhysDate(arrivalStart)}..{RoutePhysDate(arrivalEnd)} minFlight={minFlightTime:0.###} maxFlight={maxFlightTime:0.###}");
-                return false;
-            }
-
-            const int departureIntervals = PorkchopIntervals;
-            const int arrivalIntervals = PorkchopIntervals;
-            var departureStep = (departureEnd - departureStart) / departureIntervals;
-            var arrivalStep = (arrivalEnd - arrivalStart) / arrivalIntervals;
-            var mu = fromOrbit.GetMu();
-            var fromPropagator = OrbitPropagator.GetPropagator(fromOrbit);
-            var toPropagator = OrbitPropagator.GetPropagator(toOrbit);
-            if (fromPropagator == null || toPropagator == null)
-            {
-                LogRouteMission(
-                    $"step=abort reason=missing-propagator fromPropagator={fromPropagator != null} toPropagator={toPropagator != null}");
-                return false;
-            }
-
-            LogRouteMission(
-                $"step=window mode={flightPlanMode} depart={RoutePhysDate(departureStart)}..{RoutePhysDate(departureEnd)} arrival={RoutePhysDate(arrivalStart)}..{RoutePhysDate(arrivalEnd)} departStep={departureStep:0.###} arrivalStep={arrivalStep:0.###} periods={fromOrbit.GetPeriod():0.###}/{toOrbit.GetPeriod():0.###} departWindow={departureWindow:0.###} arrivalCenter={arrivalCenter:0.###} minFlight={minFlightTime:0.###} maxFlight={maxFlightTime:0.###} mu={mu:0.###}");
-
-            var arrivalStates = new (Vector3d Position, Vector3d Velocity)[arrivalIntervals + 1];
-            for (var arrivalIndex = 0; arrivalIndex <= arrivalIntervals; arrivalIndex++)
-            {
-                var arrivalTime = arrivalStart + arrivalIndex * arrivalStep;
-                var propagated = toPropagator.PropagateToTime(arrivalTime);
-                arrivalStates[arrivalIndex] = (propagated.Item1, propagated.Item2);
-            }
-
-            var now = MonoBehaviourSingleton<TimeController>.Instance?.CurrentTime ?? DateTime.Now;
-            var availableDeltaV = EstimateAvailableDeltaV(vehicle, cargo, company);
-            var bestArrival = DateTime.MaxValue;
-            var bestDeparture = DateTime.MinValue;
-            var bestDeltaV = 0.0;
-            var bestDepartureIndex = -1;
-            var bestArrivalIndex = -1;
-            var maxDepartureIndex = departureIntervals;
-            var maxArrivalIndex = arrivalIntervals;
-            for (var departureIndex = 0; departureIndex <= maxDepartureIndex; departureIndex++)
-            {
-                var departureTime = departureStart + departureIndex * departureStep;
-                var departureState = fromPropagator.PropagateToTime(departureTime);
-                for (var arrivalIndex = 0; arrivalIndex <= maxArrivalIndex; arrivalIndex++)
-                {
-                    var arrivalTime = arrivalStart + arrivalIndex * arrivalStep;
-                    if (arrivalTime <= departureTime + minFlightTime)
-                        continue;
-
-                    var arrivalState = arrivalStates[arrivalIndex];
-                    if (!TryComputeLambertTotalDeltaV(
-                            departureState.Item1,
-                            arrivalState.Position,
-                            mu,
-                            arrivalTime - departureTime,
-                            departureState.Item2,
-                            arrivalState.Velocity,
-                            out var candidateDeltaV))
-                        continue;
-
-                    var candidateArrival = GravityScaler.GetWorldTimeDateTime(arrivalTime, GravityScaler.Units.SOLAR);
-                    var candidateDeparture = GravityScaler.GetWorldTimeDateTime(departureTime, GravityScaler.Units.SOLAR);
-                    var candidateFuel = EstimateFlightFuelValue(vehicle, cargo, company, candidateDeltaV);
-                    var tankOk = vehicle.SolarPowered
-                        || vehicle.FuelCapacity <= 0.001
-                        || candidateFuel <= vehicle.FuelCapacity + 0.001;
-                    var underGate = vehicle.SolarPowered
-                        || (candidateDeltaV <= availableDeltaV + 0.001 && tankOk);
-                    var better = underGate && IsBetterPorkchopCandidate(
-                        flightPlanMode,
-                        candidateDeltaV,
-                        candidateArrival,
-                        bestDeltaV,
-                        bestArrival);
-
-                    if (!underGate)
-                        continue;
-
-                    if (!better)
-                        continue;
-
-                    bestArrival = candidateArrival;
-                    bestDeparture = candidateDeparture;
-                    bestDeltaV = candidateDeltaV;
-                    bestDepartureIndex = departureIndex;
-                    bestArrivalIndex = arrivalIndex;
-                }
-            }
-
-            if (bestDeltaV <= 0.001 || bestArrival == DateTime.MaxValue)
-            {
-                LogRouteMission(
-                    $"step=select result=fail reason=no-candidate mode={flightPlanMode} gate={availableDeltaV:0.###}");
-                return false;
-            }
-
-            deltaV = bestDeltaV;
-            var nowGame = MonoBehaviourSingleton<TimeController>.Instance?.CurrentTime ?? DateTime.Now;
-            departure = ConvertPhysicalDateToGameDate(bestDeparture, physicalNow, nowGame);
-            arrival = ConvertPhysicalDateToGameDate(bestArrival, physicalNow, nowGame);
-            travelDays = Math.Max(0.1, (arrival - departure).TotalDays);
-            LogRouteMission(
-                $"step=select result=ok mode={flightPlanMode} cell={bestDepartureIndex},{bestArrivalIndex} dV={deltaV:0.###} days={travelDays:0.###} depart={departure:yyyy-MM-dd} arrive={arrival:yyyy-MM-dd} gate={availableDeltaV:0.###}");
-            LogisticsObserver.LogVerbose(
-                $"FLIGHT-CALC instant-porkchop: {start.ObjectName}->{target.ObjectName} calc={calculationStart.ObjectName}({calculationStart.objectTypes})->{calculationTarget.ObjectName}({calculationTarget.objectTypes}) mode={flightPlanMode} gate={availableDeltaV:0.##} cell={bestDepartureIndex},{bestArrivalIndex} dV={deltaV:0.##} days={travelDays:0.#} depart={departure:yyyy-MM-dd} arrive={arrival:yyyy-MM-dd} periods={fromOrbit.GetPeriod():0.###}/{toOrbit.GetPeriod():0.###} departWindow={departureWindow:0.###} minMaxRel={vehicle.Type.MinFlightTimeHohRel:0.###}/{vehicle.Type.MaxFlightTimeHohRel:0.###}");
-            StoreInstantPorkchopCache(cacheKey, deltaV, travelDays, departure, arrival);
-            return true;
-        }
-        catch (Exception exception)
-        {
-            LogisticsObserver.LogWarning($"FLIGHT-CALC instant porkchop failed: {start.ObjectName}->{target.ObjectName} reason={exception.Message}");
-            deltaV = 0.0;
-            travelDays = 0.0;
-            departure = default;
-            arrival = default;
-            return false;
-        }
-    }
-
-    private static DateTime ConvertPhysicalDateToGameDate(DateTime physicalDate, double physicalNow, DateTime gameNow)
-    {
-        try
-        {
-            var physicalNowDate = GravityScaler.GetWorldTimeDateTime(physicalNow, GravityScaler.Units.SOLAR);
-            return gameNow.AddDays((physicalDate - physicalNowDate).TotalDays);
-        }
-        catch
-        {
-            return physicalDate;
-        }
-    }
-
-    private static string BuildInstantPorkchopCacheKey(
-        ObjectInfo start,
-        ObjectInfo target,
-        ObjectInfo calculationStart,
-        ObjectInfo calculationTarget,
-        LogisticsFlightVehicleSnapshot vehicle,
-        LogisticsFlightCargoSnapshot cargo,
-        Company company,
-        LogisticsFlightPlanMode flightPlanMode)
-    {
-        var nowTicks = MonoBehaviourSingleton<TimeController>.Instance?.CurrentTime.Ticks ?? 0L;
-        return string.Join("|",
-            nowTicks.ToString(CultureInfo.InvariantCulture),
-            DescribeRouteObjectForKey(start),
-            DescribeRouteObjectForKey(target),
-            DescribeRouteObjectForKey(calculationStart),
-            DescribeRouteObjectForKey(calculationTarget),
-            company?.GetHashCode().ToString(CultureInfo.InvariantCulture) ?? "0",
-            vehicle?.Type?.ID ?? "",
-            NormalizeFlightPlanMode(flightPlanMode).ToString(),
-            FormatCacheNumber(cargo?.CargoMass ?? 0.0),
-            FormatCacheNumber(vehicle?.DryMass ?? 0.0),
-            FormatCacheNumber(vehicle?.FuelCapacity ?? 0.0),
-            FormatCacheNumber(vehicle?.ExhaustVelocity ?? 0.0),
-            FormatCacheNumber(vehicle?.DesignAvailableDeltaV ?? 0.0),
-            FormatCacheNumber(vehicle?.Type?.MinFlightTimeHohRel ?? 0.0),
-            FormatCacheNumber(vehicle?.Type?.MaxFlightTimeHohRel ?? 0.0));
-    }
-
-    private static bool TryGetInstantPorkchopCache(string key, out double deltaV, out double travelDays,
-        out DateTime departure, out DateTime arrival)
-    {
-        deltaV = 0.0;
-        travelDays = 0.0;
-        departure = default;
-        arrival = default;
-        if (string.IsNullOrWhiteSpace(key) || !InstantPorkchopCache.TryGetValue(key, out var entry) || entry == null)
-            return false;
-
-        if (entry.DeltaV <= 0.001 || entry.TravelDays <= 0.001 || entry.Departure == default || entry.Arrival <= entry.Departure)
-            return false;
-
-        deltaV = entry.DeltaV;
-        travelDays = entry.TravelDays;
-        departure = entry.Departure;
-        arrival = entry.Arrival;
-        return true;
-    }
-
-    private static void StoreInstantPorkchopCache(string key, double deltaV, double travelDays,
-        DateTime departure, DateTime arrival)
-    {
-        if (string.IsNullOrWhiteSpace(key) || deltaV <= 0.001 || travelDays <= 0.001
-            || departure == default || arrival <= departure)
-            return;
-
-        if (InstantPorkchopCache.Count > 256)
-            InstantPorkchopCache.Clear();
-
-        InstantPorkchopCache[key] = new InstantPorkchopCacheEntry
-        {
-            DeltaV = deltaV,
-            TravelDays = travelDays,
-            Departure = departure,
-            Arrival = arrival
-        };
-    }
-
-    private static string DescribeRouteObjectForKey(ObjectInfo objectInfo)
-    {
-        return objectInfo == null
-            ? "0:null"
-            : $"{objectInfo.id.ToString(CultureInfo.InvariantCulture)}:{objectInfo.objectTypes}";
-    }
-
-    private static string FormatCacheNumber(double value)
-    {
-        return Math.Round(value, 3).ToString("0.###", CultureInfo.InvariantCulture);
-    }
-
-    private static bool IsBetterPorkchopCandidate(
-        LogisticsFlightPlanMode flightPlanMode,
-        double candidateDeltaV,
-        DateTime candidateArrival,
-        double bestDeltaV,
-        DateTime bestArrival)
-    {
-        var mode = flightPlanMode == LogisticsFlightPlanMode.Fast
-            ? LogisticsVanillaMissionPlanMode.Fastest
-            : LogisticsVanillaMissionPlanMode.Optimal;
-        return LogisticsVanillaMissionMath.IsBetterPorkchopCandidate(
-            mode,
-            candidateDeltaV,
-            candidateArrival,
-            bestDeltaV,
-            bestArrival);
-    }
-
-    private static double GetDefaultPlanMissionLeadTimeSeconds(LogisticsFlightVehicleSnapshot vehicle)
-    {
-        var economic = MonoBehaviourSingleton<GameManager>.Instance?.Economic;
-        var days = economic?.TimeAddToPlanMissionDays ?? 0f;
-        days += vehicle?.Type?.timeAddToPlanMissionDays ?? 0f;
-        return days * 86400.0 / GravityScaler.game_sec_per_phys_sec;
-    }
-
-    private static double CalculateInstantDepartureWindow(OrbitUniversal fromOrbit, OrbitUniversal toOrbit)
-    {
-        var departureWindow = 1.25 * fromOrbit.GetPeriod();
-        if (fromOrbit != toOrbit
-            && toOrbit.GetNBody().GetObjectInfo().objectTypes != global::Data.EObjectTypes.Orbit
-            && fromOrbit.GetNBody().GetObjectInfo().objectTypes != global::Data.EObjectTypes.Orbit)
-        {
-            departureWindow = 1.25 * (1.0 / (1.0 / fromOrbit.GetPeriod() - 1.0 / toOrbit.GetPeriod()));
-            if (departureWindow <= 0.0)
-                departureWindow = 1.25 * (1.0 / (-1.0 / fromOrbit.GetPeriod() + 1.0 / toOrbit.GetPeriod()));
-            if (departureWindow <= 0.0)
-                departureWindow = 1.25 * fromOrbit.GetPeriod();
-
-            var maxPeriod = Math.Max(fromOrbit.GetPeriod(), toOrbit.GetPeriod());
-            if (departureWindow > maxPeriod * 3.0)
-                departureWindow = maxPeriod;
-        }
-        else if (departureWindow > 100000.0)
-        {
-            departureWindow = 0.03999999910593033;
-        }
-
-        return Math.Max(0.001, departureWindow);
-    }
-
-    private static bool TryComputeLambertTotalDeltaV(
-        Vector3d departurePosition,
-        Vector3d arrivalPosition,
-        double mu,
-        double durationSeconds,
-        Vector3d departureVelocity,
-        Vector3d arrivalVelocity,
-        out double deltaV)
-    {
-        deltaV = 0.0;
-        var raw = ComputeLambert2Method.Invoke(null, new object[]
-        {
-            departurePosition,
-            arrivalPosition,
-            mu,
-            durationSeconds,
-            departureVelocity
-        });
-        var tuple = (ValueTuple<int, Vector3d, Vector3d>)raw;
-        if (tuple.Item1 != 0)
-            return false;
-
-        var rawDeltaV = (tuple.Item2 - departureVelocity).magnitude + (tuple.Item3 - arrivalVelocity).magnitude;
-        deltaV = ConvertPorkchopVelocity(rawDeltaV);
-        return deltaV > 0.001 && !double.IsNaN(deltaV) && !double.IsInfinity(deltaV);
-    }
-
-    private static double ConvertPorkchopVelocity(double velocity)
-    {
-        var gravityEngine = GravityEngine.Instance();
-        var scale = GravityScaler.PositionScaletoSIUnits() / Math.Max(0.001, gravityEngine.lengthScale);
-        if (gravityEngine.units != 0)
-            scale /= 1000.0;
-        return velocity * scale / GravityScaler.GetGameSecondPerPhysicsSecond();
+        return Math.Sqrt(GravitationalConstant * parent.Mass / radiusMeters) / 1000.0;
     }
 
     private static void LogRouteMission(string message)
@@ -853,21 +941,6 @@ internal static class LogisticsFlightCalculator
             return "null";
 
         return $"{objectInfo.ObjectName}#{objectInfo.id}({objectInfo.objectTypes})";
-    }
-
-    private static string RoutePhysDate(double physicalTime)
-    {
-        if (double.IsNaN(physicalTime) || double.IsInfinity(physicalTime))
-            return physicalTime.ToString("0.###");
-
-        try
-        {
-            return GravityScaler.GetWorldTimeDateTime(physicalTime, GravityScaler.Units.SOLAR).ToString("yyyy-MM-dd");
-        }
-        catch
-        {
-            return physicalTime.ToString("0.###");
-        }
     }
 
     private static bool IsHeliocentricRoute(ObjectInfo start, ObjectInfo target)

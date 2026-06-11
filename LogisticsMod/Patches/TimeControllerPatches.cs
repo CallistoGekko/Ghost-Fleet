@@ -7,12 +7,10 @@ namespace LogisticsMod.Patches;
 internal static class TimeControllerPatches
 {
     private static bool _subscribed;
-    private static bool _postLoadFired;
 
     public static void ResetRuntimeFlags()
     {
         _subscribed = false;
-        _postLoadFired = false;
     }
 
     [HarmonyPrefix]
@@ -24,13 +22,6 @@ internal static class TimeControllerPatches
             __instance.onEachDayChange += Logic.LogisticsObserver.OnDayChange;
         }
 
-        if (SaveLoadPatches.PendingPostLoadTrigger && !_postLoadFired)
-        {
-            _postLoadFired = true;
-            SaveLoadPatches.PendingPostLoadTrigger = false;
-            Logic.LogisticsObserver.OnDayChange(0);
-        }
-
-        Logic.LogisticsObserver.DisableGhostFlightVisuals();
+        Logic.LogisticsObserver.UpdateGhostFlightVisuals();
     }
 }

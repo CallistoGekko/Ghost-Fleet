@@ -114,6 +114,16 @@ public class GhostFlightCargoRecord
 }
 
 [Serializable]
+public class GhostFlightModuleRecord
+{
+    public string moduleId;
+    public string displayName;
+    public double mass;
+    public bool crew;
+    public int crewValue;
+}
+
+[Serializable]
 public class GhostFlightRecord
 {
     public string flightId;
@@ -123,6 +133,9 @@ public class GhostFlightRecord
     public int fromObjectId;
     public int toObjectId;
     public List<GhostFlightCargoRecord> cargoManifest = new List<GhostFlightCargoRecord>();
+    public List<GhostFlightModuleRecord> moduleManifest = new List<GhostFlightModuleRecord>();
+    public List<GhostFlightCargoRecord> launchFuelManifest = new List<GhostFlightCargoRecord>();
+    public List<string> launchSupportLabels = new List<string>();
     public double outboundFuel;
     public double returnFuel;
     public double launchFuel;
@@ -132,6 +145,32 @@ public class GhostFlightRecord
     public double launchPayloadMass;
     public double outboundTravelDays;
     public double returnTravelDays;
+    public double outboundDeltaV;
+    public double returnDeltaV;
+    public double outboundAvailableDeltaV;
+    public double returnAvailableDeltaV;
+    public string outboundRouteKind;
+    public string returnRouteKind;
+    public LogisticsFlightPlanMode outboundFlightPlanMode = LogisticsFlightPlanMode.Optimal;
+    public LogisticsFlightPlanMode returnFlightPlanMode = LogisticsFlightPlanMode.Optimal;
+    public int dispatchCraftCount;
+    public double dryMassPerCraft;
+    public double cargoPayloadMass;
+    public double outboundMassToFuel;
+    public double returnMassToFuel;
+    public double exhaustVelocity;
+    public double fuelPowVariable;
+    public double tankCapacity;
+    public double tankFuelBeforeLaunch;
+    public double originFuelTopUp;
+    public double tankFuelAtDeparture;
+    public double tankFuelAfterOutbound;
+    public string tankFuelDeliveryResourceId;
+    public double tankFuelDelivered;
+    public double cargoHoldFuelDelivered;
+    public double tankFuelReservedForOutbound;
+    public double tankFuelReservedForReturn;
+    public double tankFuelAtArrivalAfterUnload;
     public DateTime departureDate;
     public DateTime arrivalDate;
     public GhostFlightStatus status = GhostFlightStatus.Outbound;
@@ -170,6 +209,7 @@ public class LogisticsRouteRecord
     public bool uiCollapsed;
     public string statusNote;
     public List<LogisticsRouteResourceRule> resources = new List<LogisticsRouteResourceRule>();
+    public List<GhostFlightModuleRecord> pendingModules = new List<GhostFlightModuleRecord>();
     public List<string> disabledFacilityLaunchCategories = new List<string>();
     public List<LogisticsRouteSpacecraftFlightPlan> spacecraftFlightPlans = new List<LogisticsRouteSpacecraftFlightPlan>();
 }

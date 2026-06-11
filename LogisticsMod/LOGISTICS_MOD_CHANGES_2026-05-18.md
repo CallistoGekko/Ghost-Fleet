@@ -47,6 +47,7 @@ This note summarizes the recent source-code changes made during the logistics ro
 - Routed Space Elevator icons through the launch-support sprite path instead of its placeholder-prone facility descriptor image.
 - Detected built Space Elevators from finished/enabled source facilities and exposed them to route launch support even when vanilla does not create a fake launch vehicle row.
 - Detected all finished/enabled launch facility categories directly from source facilities so Launch Pad and similar buildings are available even when vanilla does not surface a fake launch vehicle row.
+- Let direct built facility launch support replace its fake launch vehicle row for route surface lifts, preventing enabled Rotary Launchers from being hidden by fake-LV readiness/cooldown.
 - Kept directly detected launch facility tiles on category representative art so Launch Pad availability does not pick up unrelated built-facility descriptor sprites.
 - Added larger Keep/Target amount steps up to 1B in paired positive/negative rows in the logistics amount editors.
 - Rendered empty route resource, spacecraft, and launch vehicle sections as matching table-color rows with lightly padded left-aligned primary text.
@@ -54,6 +55,17 @@ This note summarizes the recent source-code changes made during the logistics ro
 - Removed the remaining horizontal padding from the floating facility launch grid so its tile edges align with the route editor rows.
 - Switched logistics amount labels to compact mass postfix text such as `KT`, `MT`, and `BT` while preserving button theme colors.
 - Fixed route resource priority controls so they refresh as a radio-button group with only the selected priority using the active state.
+- Added balanced mixed-manifest route dispatch so one assigned ship can split cargo capacity across same-priority shippable resources instead of launching a one-resource partial load.
+- Let route resource priority control partial-load dispatch urgency: High can launch at 10% manifest fill and Critical can launch with any positive carried amount.
+- Added a clickable route flight detail page showing frozen cargo, launch fuel, outbound/return fuel, delta-v, mass, tank, mode, and route-kind calculation inputs.
+- Softened all-caps module cargo names and compacted route traffic module manifests into icon-count stacks.
+- Allowed queued modules on same-body surface-to-orbit routes to lift directly on route launch support or assigned launch vehicles without requiring assigned spacecraft.
+- Kept the logistics popup above normal game windows but below active vanilla alert/trivia popups by re-layering it through `UIManager.Open(...)`.
+- Prevented one loaded spacecraft launch from splitting across multiple launch supports, so reserved launch vehicles and facility launchers are selected as one-or-the-other per payload.
+- Normalized logistics UI icon rendering so custom resource, module, asset, location, and launch-support icons stay inside fixed UI slots without modifying the source art.
+- Replaced raw resource ids in route status text with the normal resource icon/name label, including missing fuel messages.
+- Removed the route-side legacy porkchop/Lambert grid implementation; logistics flight planning is now estimator-only and guarded by formula tests.
+- Logistics arrivals, including launch-vehicle/facility lift transfers, now advance matching vanilla `Deliver` contract objectives after cargo is added to the destination.
 
 ## Quotas And Vehicle Availability
 
@@ -196,7 +208,7 @@ This note summarizes the recent source-code changes made during the logistics ro
 - Enriched the sticky route subheader with body icons and removed the duplicate route header from the scroll area.
 - Removed the redundant route editor status/resource summary block so route planners open directly into the editable resource table.
 - Added the route status dot to the sticky route subheader, moved Back beside Pause/Resume on the right, and gave Pause an amber warning treatment.
-- Blocked human cargo from shared non-elevator facility lift while allowing space elevators and assigned/reserved launch vehicles.
+- Refined human route launch safety so launch pads, space elevators, standard launch vehicles, and assigned/reserved launch vehicles are crew-safe, while magnetic rails, rotary launchers, electromagnetic catapults, and stationary mass drivers remain cargo-only; space elevators now supersede fuel-burning launch support when available.
 - Some Nike missions are still attempting incorrect cargo payloads.
 - Current diagnostics are intended to show the full path from planner manifest to stock launch attempt:
   - intended cargo and fuel manifest,
@@ -205,3 +217,10 @@ This note summarizes the recent source-code changes made during the logistics ro
   - stock planner result,
   - final `CreateFly` manifest.
 - The next log review should compare `LOGI-MANIFEST`, `LOGI-CAP`, `LOGI-SCHEDULE`, and `LOGI-LAUNCH` entries for the same route and ship.
+- Route launch planning now sizes launch support against the loaded spacecraft mass, including outbound fuel and any return fuel carried from origin.
+- Clicking a route traffic flight now opens its readout as a full route subpage instead of embedding it inside the flight list.
+- Same-fuel routes now treat assigned spacecraft as tankers: they can launch with a full tank, deliver surplus tank fuel, and use spare cargo capacity for extra fuel while preserving return reserves.
+- Route resource editing now opens on Target by default and shows Target before Keep.
+- Allowed human-containing route manifests to dispatch once they are at least half full by mass, while ordinary cargo routes continue to prefer full or final-partial loads.
+- Kept plain Launch Pad facilities as passive launch-cost support unless vanilla exposes a fake launch vehicle for standalone route launch support.
+- Removed post-load route planning so opening an autosave or manual save restores logistics state without immediately creating new dispatches.

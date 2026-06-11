@@ -30,27 +30,12 @@ internal static class SaveLoadPatches
             Data.LogisticsPersistence.Load(saveName);
 
         Data.LogisticsNetwork.ReleaseOrphanedRouteAssets();
-        QueuePostLoadPlanning();
     }
 
     private static void ResetLoadState()
     {
-        _pendingPostLoadTrigger = false;
         Data.LogisticsNetwork.ClearAll();
         LogisticsObserver.ResetRuntimeState();
         TimeControllerPatches.ResetRuntimeFlags();
     }
-
-    private static void QueuePostLoadPlanning()
-    {
-        _pendingPostLoadTrigger = true;
-    }
-
-    public static bool PendingPostLoadTrigger
-    {
-        get => _pendingPostLoadTrigger;
-        set => _pendingPostLoadTrigger = value;
-    }
-    private static bool _pendingPostLoadTrigger;
-
 }

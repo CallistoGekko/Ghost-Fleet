@@ -2,11 +2,14 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text;
 using CustomUpdate;
 using Extensions;
 using Game;
 using Game.Info;
 using Game.ObjectInfoDataScripts;
+using Game.UI;
+using Game.UI.DragAndDropSystem;
 using Game.UI.Windows.Elements.ObjectInfoElements;
 using Game.UI.Windows.Windows;
 using Language;
@@ -18,6 +21,7 @@ using UnityEngine;
 using UnityEngine.EventSystems;
 using UnityEngine.UI;
 using LaunchVehicleType = global::Data.ScriptableObject.LaunchVehicleType;
+using SpaceModuleDescriptor = global::Data.ScriptableObject.SpaceModuleDescriptor;
 using SpacecraftType = global::Data.ScriptableObject.SpacecraftType;
 
 namespace LogisticsMod.UI;
@@ -36,10 +40,16 @@ public class LogisticsUI : MonoBehaviour
     private const float RouteOverviewDetailBottomInset = 4f;
     private const float RouteOverviewGroupGap = 12f;
     private const float RouteResourceRowHeight = 34f;
+    private const float RouteModuleCargoRowHeight = 42f;
+    private const float RouteModuleCargoMassStatusGap = 14f;
     private const float GhostFlightRowHeight = 46f;
     private const float RouteAssetNumberColumnWidth = 48f;
     private const float RouteAssetIconColumnWidth = 46f;
     private const float RouteAssetNameColumnWidth = 160f;
+    private const float LogisticsInlineIconSpritePercent = 80f;
+    private const float LogisticsCompactIconSpritePercent = 76f;
+    private const float LogisticsTableIconSpritePercent = 78f;
+    private const float RouteModuleIconCellHeight = 34f;
     private const float FlightPlanModeControlsWidth = 150f;
     private const float FlightPlanModeFastButtonWidth = 58f;
     private const float FlightPlanModeOptimalButtonWidth = 76f;
@@ -47,6 +57,8 @@ public class LogisticsUI : MonoBehaviour
     private const float FlightPlanModeButtonGroupWidth =
         FlightPlanModeFastButtonWidth + FlightPlanModeButtonGap + FlightPlanModeOptimalButtonWidth;
     private const float FlightPlanModeColumnGap = 10f;
+    private const int RouteCountEditorContentInset = 8;
+    private const float RouteCountEditorBackGap = 4f;
     private const float RouteFacilityLaunchOptionWidth = 176f;
     private const float RouteFacilityLaunchOptionHeight = 54f;
     private const float RouteFacilityLaunchIconColumnWidth = 42f;
@@ -154,9 +166,13 @@ public class LogisticsUI : MonoBehaviour
     private RectTransform _popupBodySwitchRow;
     private RectTransform _popupRouteSubheader;
     private int _activeRouteEditorRouteId = -1;
+    private int _activeRouteFlightDetailRouteId = -1;
+    private string _activeRouteFlightDetailId;
     private bool _routeEditorMainPageVisible;
     private DateTime _lastRouteEditorRefreshTime = DateTime.MinValue;
+    private string _lastRouteEditorRefreshSignature;
     private float _nextRouteEditorLiveRefreshAt;
+    private bool _lastRouteModuleDragHintVisible;
     private bool _popupRegisteredOpen;
 
     private LogisticsSection _getSection;
@@ -167,6 +183,21 @@ public class LogisticsUI : MonoBehaviour
     private static readonly List<LogisticsUI> _openPopupInstances = new List<LogisticsUI>();
 
     public static bool AnyPopupOpen => _openPopupCount > 0;
+
+    public static void PlaceOpenPopupsOnWindowLayer()
+    {
+        for (var i = _openPopupInstances.Count - 1; i >= 0; i--)
+        {
+            var ui = _openPopupInstances[i];
+            if (ui == null || ui._popupRoot == null || !ui._popupRoot.activeSelf)
+            {
+                _openPopupInstances.RemoveAt(i);
+                continue;
+            }
+
+            ui.PlacePopupOnWindowLayer();
+        }
+    }
 
     public static bool ConsumeEscapeIfPopupOpen()
     {
@@ -213,6 +244,77 @@ public class LogisticsUI : MonoBehaviour
         if (canvas == null || canvas.renderMode == RenderMode.ScreenSpaceOverlay)
             return null;
         return canvas.worldCamera;
+    }
+
+    private void PlacePopupOnWindowLayer()
+    {
+        if (_popupRoot == null)
+            return;
+
+        var popupTransform = _popupRoot.transform;
+        var parent = popupTransform.parent;
+        if (parent == null)
+            return;
+
+        var alertWindow = FindActiveVanillaAlertWindow(parent);
+        if (alertWindow != null && alertWindow.parent == parent)
+        {
+            popupTransform.SetSiblingIndex(alertWindow.GetSiblingIndex());
+            return;
+        }
+
+        popupTransform.SetAsLastSibling();
+    }
+
+    private static Transform FindActiveVanillaAlertWindow(Transform parent)
+    {
+        if (parent == null)
+            return null;
+
+        var currentAlert = SerializedMonoBehaviourSingleton<UIManager>.Instance?.Current2;
+        if (currentAlert != null
+            && currentAlert.Open
+            && currentAlert.transform.parent == parent
+            && IsVanillaAlertWindow(currentAlert.transform))
+            return currentAlert.transform;
+
+        for (var i = 0; i < parent.childCount; i++)
+        {
+            var child = parent.GetChild(i);
+            if (child == null || !child.gameObject.activeInHierarchy)
+                continue;
+            if (IsVanillaAlertWindow(child))
+                return child;
+        }
+
+        return null;
+    }
+
+    private static bool IsVanillaAlertWindow(Transform candidate)
+    {
+        if (candidate == null)
+            return false;
+        if (candidate.GetComponent<global::PopUpWindowYesNo>() != null
+            || candidate.GetComponent<global::TriviaWindow>() != null)
+            return true;
+
+        var window = candidate.GetComponent<UIWindow>();
+        if (window == null)
+            return false;
+
+        switch (window.WindowType)
+        {
+            case EWindowType.PopUpWindow:
+            case EWindowType.PopUpWindow2:
+            case EWindowType.PopUpWindowYESNO:
+            case EWindowType.PopUpWindowYESNOMenu:
+            case EWindowType.PopUpWindowYESContract:
+            case EWindowType.PopUpWindowBeforeTutorial:
+            case EWindowType.TriviaWindow:
+                return true;
+            default:
+                return false;
+        }
     }
 
     private static bool SameObjectInfo(ObjectInfo left, ObjectInfo right)
@@ -486,6 +588,35 @@ public class LogisticsUI : MonoBehaviour
             _velocityY = 0f;
             _hasSmoothTarget = false;
         }
+    }
+
+    private sealed class RouteModuleDropTarget : MonoBehaviour, IDragAndDropTarget
+    {
+        public LogisticsUI Owner;
+        public LogisticsSection Section;
+        public int RouteId;
+
+        public bool OnDragAndDrop(DragAndDropTransactItem item)
+        {
+            return Owner != null && Owner.HandleRouteModuleDrop(Section, RouteId, item);
+        }
+    }
+
+    private sealed class RoutePendingModuleGroup
+    {
+        public Data.GhostFlightModuleRecord Sample;
+        public readonly List<int> Indexes = new List<int>();
+        public int Count => Indexes.Count;
+    }
+
+    private sealed class RouteModuleDisplayGroup
+    {
+        public Data.GhostFlightModuleRecord Sample;
+        public string ModuleId;
+        public string Name;
+        public string Icon;
+        public double Mass;
+        public int Count;
     }
 
     private sealed class VirtualFixedList : MonoBehaviour
@@ -1168,7 +1299,7 @@ public class LogisticsUI : MonoBehaviour
         _currentData = _selectedData;
         _currentObjectInfo = _selectedObjectInfo;
         _popupRoot.SetActive(true);
-        _popupRoot.transform.SetAsLastSibling();
+        PlacePopupOnWindowLayer();
         _popupPinnedData = _currentData;
         _popupPinnedObjectInfo = _currentObjectInfo;
         RegisterPopupOpen(true);
@@ -1718,7 +1849,9 @@ public class LogisticsUI : MonoBehaviour
         if (_popupTitle != null)
             _popupTitle.text = $"{CompactObjectName(_currentObjectInfo)} Logistics";
         RebuildBodySwitchButtons();
-        if (TryGetActiveRouteEditor(out var activeRoute))
+        if (TryGetActiveRouteFlightDetail(out var detailRoute, out var detailFlight))
+            ShowRouteFlightDetail(_routesSection, detailRoute, detailFlight);
+        else if (TryGetActiveRouteEditor(out var activeRoute))
             ShowRouteEditor(_routesSection, activeRoute);
         else
             BuildRoutesSection();
@@ -1744,10 +1877,41 @@ public class LogisticsUI : MonoBehaviour
         return false;
     }
 
+    private bool TryGetActiveRouteFlightDetail(out Data.LogisticsRouteRecord route, out Data.GhostFlightRecord flight)
+    {
+        route = null;
+        flight = null;
+        if (_activeRouteFlightDetailRouteId <= 0 || string.IsNullOrWhiteSpace(_activeRouteFlightDetailId)
+            || _currentObjectInfo == null)
+        {
+            return false;
+        }
+
+        var data = Data.LogisticsNetwork.Get(_currentObjectInfo);
+        route = data?.routes?.FirstOrDefault(candidate => candidate != null
+            && candidate.routeId == _activeRouteFlightDetailRouteId);
+        flight = data?.ghostFlights?.FirstOrDefault(candidate => candidate != null
+            && candidate.routeId == _activeRouteFlightDetailRouteId
+            && string.Equals(candidate.flightId, _activeRouteFlightDetailId, System.StringComparison.Ordinal));
+
+        if (route != null && flight != null)
+            return true;
+
+        ClearActiveRouteFlightDetail();
+        return false;
+    }
+
     private void ClearActiveRouteEditor()
     {
         _activeRouteEditorRouteId = -1;
+        ClearActiveRouteFlightDetail();
         SetRouteEditorMainPageVisible(false);
+    }
+
+    private void ClearActiveRouteFlightDetail()
+    {
+        _activeRouteFlightDetailRouteId = -1;
+        _activeRouteFlightDetailId = null;
     }
 
     private void SetRouteEditorMainPageVisible(bool visible)
@@ -1762,7 +1926,9 @@ public class LogisticsUI : MonoBehaviour
         else
         {
             _lastRouteEditorRefreshTime = DateTime.MinValue;
+            _lastRouteEditorRefreshSignature = null;
             _nextRouteEditorLiveRefreshAt = 0f;
+            _lastRouteModuleDragHintVisible = false;
         }
     }
 
@@ -1777,26 +1943,162 @@ public class LogisticsUI : MonoBehaviour
             return;
 
         var currentTime = CurrentGameTimeOrMinValue();
-        if (currentTime == DateTime.MinValue)
+        var moduleDragHintVisible = IsRouteModuleDragActive();
+        var moduleDragHintChanged = moduleDragHintVisible != _lastRouteModuleDragHintVisible;
+        if (currentTime == DateTime.MinValue && !moduleDragHintChanged)
             return;
 
-        if (_lastRouteEditorRefreshTime == DateTime.MinValue)
+        if (_lastRouteEditorRefreshTime == DateTime.MinValue && !moduleDragHintChanged)
         {
             _lastRouteEditorRefreshTime = currentTime;
+            _lastRouteModuleDragHintVisible = moduleDragHintVisible;
             return;
         }
 
-        if (currentTime == _lastRouteEditorRefreshTime || Time.unscaledTime < _nextRouteEditorLiveRefreshAt)
+        var timeAdvanced = currentTime != DateTime.MinValue && currentTime != _lastRouteEditorRefreshTime;
+        if (!moduleDragHintChanged && (!timeAdvanced || Time.unscaledTime < _nextRouteEditorLiveRefreshAt))
             return;
 
         if (!TryGetActiveRouteEditor(out var route))
             return;
 
-        var scrollPosition = _popupScroll != null ? _popupScroll.verticalNormalizedPosition : 1f;
-        _lastRouteEditorRefreshTime = currentTime;
+        var refreshSignature = BuildRouteEditorLiveRefreshSignature(route);
+        if (currentTime != DateTime.MinValue)
+            _lastRouteEditorRefreshTime = currentTime;
+        _lastRouteModuleDragHintVisible = moduleDragHintVisible;
         _nextRouteEditorLiveRefreshAt = Time.unscaledTime + RouteEditorLiveRefreshIntervalSeconds;
+        if (string.Equals(refreshSignature, _lastRouteEditorRefreshSignature, StringComparison.Ordinal))
+            return;
+
+        var scrollPosition = _popupScroll != null ? _popupScroll.verticalNormalizedPosition : 1f;
         ShowRouteEditor(_routesSection, route);
         RestorePopupScrollPosition(scrollPosition);
+    }
+
+    private void RememberRouteEditorLiveRefreshState(Data.LogisticsRouteRecord route)
+    {
+        _lastRouteEditorRefreshTime = CurrentGameTimeOrMinValue();
+        _lastRouteModuleDragHintVisible = IsRouteModuleDragActive();
+        _lastRouteEditorRefreshSignature = BuildRouteEditorLiveRefreshSignature(route);
+    }
+
+    private string BuildRouteEditorLiveRefreshSignature(Data.LogisticsRouteRecord route)
+    {
+        if (route == null)
+            return "";
+
+        var builder = new StringBuilder();
+        builder.Append(route.routeId).Append('|')
+            .Append(route.sourceObjectId).Append('|')
+            .Append(route.destinationObjectId).Append('|')
+            .Append(route.isActive).Append('|')
+            .Append(route.statusNote ?? "").AppendLine();
+        builder.Append("module-drag|").Append(IsRouteModuleDragActive()).AppendLine();
+
+        foreach (var rule in (route.resources ?? new List<Data.LogisticsRouteResourceRule>())
+                     .Where(rule => rule != null)
+                     .OrderBy(rule => rule.resourceDef?.id ?? "", StringComparer.Ordinal))
+        {
+            builder.Append("rule|")
+                .Append(rule.resourceDef?.id ?? "").Append('|')
+                .Append(rule.sourceKeep.ToString("0.###")).Append('|')
+                .Append(rule.destinationTarget.ToString("0.###")).Append('|')
+                .Append(rule.isActive).Append('|')
+                .Append(rule.priority).Append('|')
+                .Append(rule.statusNote ?? "").AppendLine();
+        }
+
+        foreach (var module in (route.pendingModules ?? new List<Data.GhostFlightModuleRecord>())
+                     .Where(module => module != null)
+                     .OrderBy(module => module.moduleId ?? "", StringComparer.Ordinal)
+                     .ThenBy(module => module.displayName ?? "", StringComparer.Ordinal))
+        {
+            builder.Append("pending-module|")
+                .Append(module.moduleId ?? "").Append('|')
+                .Append(module.displayName ?? "").Append('|')
+                .Append(module.mass.ToString("0.###")).Append('|')
+                .Append(module.crew).Append('|')
+                .Append(module.crewValue).AppendLine();
+        }
+
+        foreach (var plan in (route.spacecraftFlightPlans ?? new List<Data.LogisticsRouteSpacecraftFlightPlan>())
+                     .Where(plan => plan != null)
+                     .OrderBy(plan => plan.shipTypeId ?? "", StringComparer.Ordinal))
+        {
+            builder.Append("plan|")
+                .Append(plan.shipTypeId ?? "").Append('|')
+                .Append((int)LogisticsFlightCalculator.NormalizeFlightPlanMode(plan.flightPlanMode)).AppendLine();
+        }
+
+        var data = _currentObjectInfo != null ? Data.LogisticsNetwork.Get(_currentObjectInfo) : null;
+        foreach (var craft in (data?.ghostCraft ?? new List<Data.GhostCraftRecord>())
+                     .Where(craft => craft != null && craft.assignedRouteId == route.routeId)
+                     .OrderBy(craft => craft.ledgerId))
+        {
+            builder.Append("craft|")
+                .Append(craft.ledgerId).Append('|')
+                .Append(craft.shipTypeId ?? "").Append('|')
+                .Append((int)craft.status).Append('|')
+                .Append(craft.currentObjectId).Append('|')
+                .Append(craft.currentFlightId ?? "").Append('|')
+                .Append(craft.arrivalDate.Ticks).Append('|')
+                .Append(craft.blockedReason ?? "").AppendLine();
+        }
+
+        foreach (var vehicle in (data?.ghostLaunchVehicles ?? new List<Data.GhostLaunchVehicleRecord>())
+                     .Where(vehicle => vehicle != null && vehicle.assignedRouteId == route.routeId)
+                     .OrderBy(vehicle => vehicle.ledgerId))
+        {
+            builder.Append("launch|")
+                .Append(vehicle.ledgerId).Append('|')
+                .Append(vehicle.launchVehicleTypeId ?? "").Append('|')
+                .Append((int)vehicle.status).Append('|')
+                .Append(vehicle.currentObjectId).Append('|')
+                .Append(vehicle.availableDate.Ticks).Append('|')
+                .Append(vehicle.blockedReason ?? "").AppendLine();
+        }
+
+        foreach (var flight in (data?.ghostFlights ?? new List<Data.GhostFlightRecord>())
+                     .Where(flight => flight != null
+                         && flight.routeId == route.routeId
+                         && flight.status != Data.GhostFlightStatus.Complete
+                         && flight.status != Data.GhostFlightStatus.Cancelled)
+                     .OrderBy(flight => flight.arrivalDate)
+                     .ThenBy(flight => flight.departureDate)
+                     .ThenBy(flight => flight.flightId ?? "", StringComparer.Ordinal))
+        {
+            builder.Append("flight|")
+                .Append(flight.flightId ?? "").Append('|')
+                .Append((int)flight.status).Append('|')
+                .Append(flight.isReturnFlight).Append('|')
+                .Append(flight.fromObjectId).Append('|')
+                .Append(flight.toObjectId).Append('|')
+                .Append(flight.departureDate.Ticks).Append('|')
+                .Append(flight.arrivalDate.Ticks).Append('|')
+                .Append(flight.outboundFuel.ToString("0.###")).Append('|')
+                .Append(flight.fuelResourceId ?? "").Append('|')
+                .Append(string.Join(",", (flight.craftLedgerIds ?? new List<int>()).OrderBy(id => id))).Append('|')
+                .Append(BuildGhostFlightCargoSignature(flight))
+                .AppendLine();
+        }
+
+        return builder.ToString();
+    }
+
+    private static string BuildGhostFlightCargoSignature(Data.GhostFlightRecord flight)
+    {
+        var resources = string.Join(",",
+            (flight?.cargoManifest ?? new List<Data.GhostFlightCargoRecord>())
+            .Where(item => item != null)
+            .OrderBy(item => item.resourceId ?? "", StringComparer.Ordinal)
+            .Select(item => $"{item.resourceId ?? ""}:{item.cargoAmount:0.###}:{item.supplyConsumed:0.###}"));
+        var modules = string.Join(",",
+            (flight?.moduleManifest ?? new List<Data.GhostFlightModuleRecord>())
+            .Where(item => item != null)
+            .OrderBy(item => item.moduleId ?? "", StringComparer.Ordinal)
+            .ThenBy(item => item.displayName ?? "", StringComparer.Ordinal)
+            .Select(item => $"{item.moduleId ?? ""}:{item.displayName ?? ""}:{item.mass:0.###}"));
+        return $"{resources}|modules={modules}";
     }
 
     private static DateTime CurrentGameTimeOrMinValue()
@@ -1898,7 +2200,7 @@ public class LogisticsUI : MonoBehaviour
         _popupPinnedData = targetData;
         _popupPinnedObjectInfo = target;
         _popupRoot.SetActive(true);
-        _popupRoot.transform.SetAsLastSibling();
+        PlacePopupOnWindowLayer();
         RegisterPopupOpen(true);
         EnsurePopupSections();
         if (_popupScroll != null)
@@ -2342,7 +2644,7 @@ public class LogisticsUI : MonoBehaviour
                 {
                     item.Index,
                     Resource = rd,
-                    Icon = rd?.IconString,
+                    Icon = NormalizeLogisticsIconText(rd?.IconString, LogisticsCompactIconSpritePercent),
                     SortName = ResourceSortName(rd, item.Rule.resourceDef?.id),
                     Color = item.Rule.isActive ? _runtimeStyle.RowTextColor : SubtleTextColor
                 };
@@ -2380,7 +2682,7 @@ public class LogisticsUI : MonoBehaviour
                 rule.ResourceDefinition = rd;
                 return new
                 {
-                    Icon = rd?.IconString,
+                    Icon = NormalizeLogisticsIconText(rd?.IconString, LogisticsCompactIconSpritePercent),
                     SortName = ResourceSortName(rd, rule.resourceDef?.id),
                     Color = rule.isActive ? _runtimeStyle.RowTextColor : DisabledTextColor
                 };
@@ -2388,18 +2690,40 @@ public class LogisticsUI : MonoBehaviour
             .Where(item => !string.IsNullOrWhiteSpace(item.Icon))
             .OrderBy(item => item.SortName, System.StringComparer.OrdinalIgnoreCase)
             .ToList();
+        var moduleIcons = (route.pendingModules ?? new List<Data.GhostFlightModuleRecord>())
+            .Where(module => module != null)
+            .Select(module => new
+            {
+                Icon = RouteModuleIcon(module),
+                SortName = RouteModuleDisplayName(module),
+                Color = SecondaryTextColor
+            })
+            .Where(item => !string.IsNullOrWhiteSpace(item.Icon))
+            .OrderBy(item => item.SortName, System.StringComparer.OrdinalIgnoreCase)
+            .ToList();
 
         const int maxIcons = 8;
+        var displayed = 0;
         foreach (var icon in icons.Take(maxIcons))
+        {
             AddCollapsedRouteResourceIcon(parent, icon.Icon, icon.Color);
+            displayed++;
+        }
 
-        if (icons.Count > maxIcons)
-            AddCollapsedRouteSummaryText(parent, $"+{icons.Count - maxIcons}");
+        foreach (var icon in moduleIcons.Take(Math.Max(0, maxIcons - displayed)))
+        {
+            AddCollapsedRouteResourceIcon(parent, icon.Icon, icon.Color);
+            displayed++;
+        }
+
+        var totalIcons = icons.Count + moduleIcons.Count;
+        if (totalIcons > maxIcons)
+            AddCollapsedRouteSummaryText(parent, $"+{totalIcons - maxIcons}");
     }
 
     private TextMeshProUGUI AddCollapsedRouteResourceIcon(Transform parent, string icon, Color color)
     {
-        var label = MakeTMP(parent, icon, 13f, color);
+        var label = MakeTMP(parent, NormalizeLogisticsIconText(icon, LogisticsCompactIconSpritePercent), 13f, color);
         label.alignment = TextAlignmentOptions.Center;
         label.enableWordWrapping = false;
         label.overflowMode = TextOverflowModes.Overflow;
@@ -2448,7 +2772,7 @@ public class LogisticsUI : MonoBehaviour
         btn.navigation = new Navigation { mode = Navigation.Mode.None };
         btn.onClick.AddListener(onClick);
 
-        var label = MakeTMP(btnGo.transform, icon, 18f, color);
+        var label = MakeTMP(btnGo.transform, NormalizeLogisticsIconText(icon, LogisticsTableIconSpritePercent), 18f, color);
         label.alignment = TextAlignmentOptions.Center;
         label.enableWordWrapping = false;
         label.overflowMode = TextOverflowModes.Overflow;
@@ -2868,21 +3192,37 @@ public class LogisticsUI : MonoBehaviour
         return label;
     }
 
-    private Image AddObjectIcon(Transform parent, ObjectInfo oi, float size)
+    private static Image AddFixedIconImage(Transform parent, string name, Sprite sprite, float width, float height, Color color)
     {
-        var iconGo = new GameObject("ObjectIcon", typeof(RectTransform), typeof(Image), typeof(LayoutElement));
+        var iconGo = new GameObject(name, typeof(RectTransform), typeof(Image), typeof(LayoutElement));
         iconGo.transform.SetParent(parent, false);
         var layout = iconGo.GetComponent<LayoutElement>();
-        layout.minWidth = size;
-        layout.preferredWidth = size;
-        layout.minHeight = size;
-        layout.preferredHeight = size;
+        layout.minWidth = width;
+        layout.preferredWidth = width;
+        layout.minHeight = height;
+        layout.preferredHeight = height;
         layout.flexibleWidth = 0f;
         layout.flexibleHeight = 0f;
 
+        var rt = iconGo.GetComponent<RectTransform>();
+        rt.anchorMin = Vector2.zero;
+        rt.anchorMax = Vector2.one;
+        rt.offsetMin = Vector2.zero;
+        rt.offsetMax = Vector2.zero;
+
         var image = iconGo.GetComponent<Image>();
+        image.sprite = sprite;
+        image.enabled = sprite != null;
+        image.color = color;
         image.preserveAspect = true;
         image.raycastTarget = false;
+        return image;
+    }
+
+    private Image AddObjectIcon(Transform parent, ObjectInfo oi, float size)
+    {
+        var image = AddFixedIconImage(parent, "ObjectIcon", null, size, size, Color.white);
+        var iconGo = image.gameObject;
 
         var fallback = MakeTMP(iconGo.transform, "", size * 0.72f, PrimaryTextColor);
         fallback.gameObject.name = "ObjectIconFallback";
@@ -2928,8 +3268,11 @@ public class LogisticsUI : MonoBehaviour
         }
 
         _activeRouteEditorRouteId = route.routeId;
+        ClearActiveRouteFlightDetail();
         SetRouteEditorMainPageVisible(true);
         ShowPopupRouteSubheader(section, route);
+
+        AddRouteModuleCargoSection(section, route);
 
         AddBigButton(section.ContentArea, "+ Add Route Resource", _runtimeStyle.ConfirmButtonColor, () =>
         {
@@ -2975,6 +3318,7 @@ public class LogisticsUI : MonoBehaviour
         AddRouteFacilityLaunchOptionRows(section, route);
         AddRouteGhostFlightsSection(section, route);
         RebuildSectionLayout(section);
+        RememberRouteEditorLiveRefreshState(route);
     }
 
     private void AddRouteResourceTableHeader(LogisticsSection section)
@@ -3045,11 +3389,292 @@ public class LogisticsUI : MonoBehaviour
         });
     }
 
+    private bool HandleRouteModuleDrop(LogisticsSection section, int routeId, DragAndDropTransactItem item)
+    {
+        var route = Data.LogisticsNetwork.FindRoute(routeId);
+        var player = MonoBehaviourSingleton<GameManager>.Instance?.Player;
+        if (route == null || section == null || player == null)
+            return false;
+
+        if (!(item is DragAndDropScriptableObjectTransactItem dragItem) || !(dragItem.helpObj is SpaceModule module))
+            return false;
+
+        if (Data.LogisticsNetwork.TryAddPendingRouteModule(route, module, player, out var reason))
+        {
+            ClearRoutePlanningStatus(route);
+            ShowRouteEditor(section, route);
+            return true;
+        }
+
+        route.statusNote = reason;
+        ShowRouteEditor(section, route);
+        return false;
+    }
+
+    private void AddRouteModuleCargoSection(LogisticsSection section, Data.LogisticsRouteRecord route)
+    {
+        if (section == null || route == null)
+            return;
+
+        var modules = route.pendingModules ?? new List<Data.GhostFlightModuleRecord>();
+        var groups = BuildRoutePendingModuleGroups(modules);
+        var showDropHint = IsRouteModuleDragActive();
+
+        if (showDropHint)
+        {
+            var dropRow = MakeHLRow(section.ContentArea, 56f, 8f);
+            var image = dropRow.GetComponent<Image>();
+            if (image != null)
+            {
+                image.color = WithAlpha(BorderColor, 0.18f);
+                image.raycastTarget = true;
+            }
+            var dropLayout = dropRow.GetComponent<HorizontalLayoutGroup>();
+            if (dropLayout != null)
+            {
+                dropLayout.padding = new RectOffset(18, 18, 8, 8);
+                dropLayout.childAlignment = TextAnchor.MiddleCenter;
+            }
+            AddHorizontalDottedDropLines(dropRow, TertiaryTextColor);
+
+            var dropTarget = dropRow.AddComponent<RouteModuleDropTarget>();
+            dropTarget.Owner = this;
+            dropTarget.Section = section;
+            dropTarget.RouteId = route.routeId;
+
+            AddTableCell(dropRow.transform, "Drop modules here", 0f, 14f, SecondaryTextColor,
+                TextAlignmentOptions.Midline, true);
+        }
+
+        if (groups.Count == 0)
+            return;
+
+        AddRouteModuleCargoHeader(section.ContentArea);
+        foreach (var group in groups)
+            AddRoutePendingModuleRow(section, route, group);
+    }
+
+    private void AddRouteModuleCargoHeader(Transform parent)
+    {
+        var row = MakeHLRow(parent, 22f, 4f);
+        row.GetComponent<Image>().color = WithAlpha(BorderColor, 0.36f);
+        AddTableCell(row.transform, "", RouteAssetIconColumnWidth, 10.5f, TertiaryTextColor);
+        AddTableCell(row.transform, "Module", 0f, 10.5f, TertiaryTextColor,
+            TextAlignmentOptions.MidlineLeft, true);
+        AddTableCell(row.transform, "Qty", 50f, 10.5f, TertiaryTextColor,
+            TextAlignmentOptions.MidlineRight);
+        AddTableCell(row.transform, "Mass", 78f, 10.5f, TertiaryTextColor,
+            TextAlignmentOptions.MidlineRight);
+        AddSpacer(row.transform, RouteModuleCargoMassStatusGap);
+        AddTableCell(row.transform, "Status", 80f, 10.5f, TertiaryTextColor,
+            TextAlignmentOptions.MidlineLeft);
+        AddTableCell(row.transform, "", 90f, 10.5f, TertiaryTextColor);
+    }
+
+    private void AddRoutePendingModuleRow(LogisticsSection section, Data.LogisticsRouteRecord route,
+        RoutePendingModuleGroup group)
+    {
+        var row = MakeHLRow(section.ContentArea, RouteModuleCargoRowHeight, 4f);
+        row.GetComponent<Image>().color = RowBgMutedColor;
+        var module = group?.Sample;
+
+        AddRouteModuleIconCell(row.transform, module);
+        AddTableCell(row.transform, RouteModuleDisplayName(module), 0f, 12.2f, PrimaryTextColor,
+            TextAlignmentOptions.MidlineLeft, true);
+        AddTableCell(row.transform, $"x{Math.Max(0, group?.Count ?? 0)}", 50f, 12f, SecondaryTextColor,
+            TextAlignmentOptions.MidlineRight);
+        AddTableCell(row.transform, FormatRecordedTons(RouteModuleMass(module) * Math.Max(0, group?.Count ?? 0)),
+            78f, 12f, SecondaryTextColor, TextAlignmentOptions.MidlineRight);
+        AddSpacer(row.transform, RouteModuleCargoMassStatusGap);
+        AddTableCell(row.transform, "Queued", 80f, 12f, WarningColor, TextAlignmentOptions.MidlineLeft);
+        AddSmallButton(row.transform, "-", _runtimeStyle.SmallButtonColor, () =>
+        {
+            var removeIndexes = group?.Indexes?.OrderByDescending(index => index)
+                .Take(RouteModuleEditStep())
+                .ToList() ?? new List<int>();
+            if (removeIndexes.Count > 0)
+                ReturnRoutePendingModules(section, route, removeIndexes);
+        }, 28f);
+        AddSmallButton(row.transform, "+", _runtimeStyle.SmallButtonPositiveColor, () =>
+        {
+            AddRoutePendingModules(section, route, module?.moduleId, RouteModuleEditStep());
+        }, 28f);
+        MakeXButton(row.transform, () =>
+        {
+            ReturnRoutePendingModules(section, route, group?.Indexes ?? new List<int>());
+        });
+    }
+
+    private void AddRouteModuleIconCell(Transform parent, Data.GhostFlightModuleRecord module)
+    {
+        var descriptor = Data.LogisticsNetwork.ResolveSpaceModuleDescriptor(module?.moduleId);
+        var sprite = RouteFacilityLaunchDescriptorSprite(descriptor);
+        if (sprite != null)
+        {
+            AddFixedIconImage(parent, "ModuleIcon", sprite, RouteAssetIconColumnWidth,
+                RouteModuleIconCellHeight, Color.white);
+            return;
+        }
+
+        AddTableIconCell(parent, RouteModuleIcon(module), 18f, RouteModuleIconCellHeight);
+    }
+
+    private static int RouteModuleEditStep()
+    {
+        if (Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.RightControl))
+            return 100;
+        if (Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift))
+            return 10;
+        return 1;
+    }
+
+    private static bool IsRouteModuleDragActive()
+    {
+        if (SerializedMonoBehaviourSingleton<UIManager>.InstanceIsNull)
+            return false;
+
+        var dragAndDrop = SerializedMonoBehaviourSingleton<UIManager>.Instance?.DragAndDropManager;
+        if (dragAndDrop == null || !dragAndDrop.IsDragging)
+            return false;
+
+        if (!(dragAndDrop.CurrentItem is DragAndDropScriptableObjectTransactItem item))
+            return false;
+
+        return item.helpObj is SpaceModule || item.item is SpaceModuleDescriptor;
+    }
+
+    private void AddRoutePendingModules(LogisticsSection section, Data.LogisticsRouteRecord route,
+        string moduleId, int count)
+    {
+        var player = MonoBehaviourSingleton<GameManager>.Instance?.Player;
+        var requestedCount = Math.Max(1, count);
+        if (Data.LogisticsNetwork.TryAddPendingRouteModule(route, moduleId, player, requestedCount,
+                out var queuedCount, out var reason))
+        {
+            ClearRoutePlanningStatus(route);
+            if (queuedCount < requestedCount)
+                route.statusNote = $"Queued {queuedCount}; source had fewer modules available";
+        }
+        else
+        {
+            route.statusNote = reason;
+        }
+        ShowRouteEditor(section, route);
+    }
+
+    private void ReturnRoutePendingModules(LogisticsSection section, Data.LogisticsRouteRecord route,
+        IEnumerable<int> indexes)
+    {
+        var player = MonoBehaviourSingleton<GameManager>.Instance?.Player;
+        string reason = null;
+        var ok = true;
+        foreach (var index in (indexes ?? Enumerable.Empty<int>()).Distinct().OrderByDescending(index => index))
+        {
+            if (Data.LogisticsNetwork.TryReturnPendingRouteModule(route, index, player, out reason))
+                continue;
+            ok = false;
+            break;
+        }
+
+        if (ok)
+            ClearRoutePlanningStatus(route);
+        else
+            route.statusNote = reason;
+        ShowRouteEditor(section, route);
+    }
+
+    private static List<RoutePendingModuleGroup> BuildRoutePendingModuleGroups(
+        List<Data.GhostFlightModuleRecord> modules)
+    {
+        var groups = new Dictionary<string, RoutePendingModuleGroup>(StringComparer.Ordinal);
+        for (var index = 0; index < (modules?.Count ?? 0); index++)
+        {
+            var module = modules[index];
+            if (module == null)
+                continue;
+
+            var key = $"{module.moduleId ?? ""}|{RouteModuleDisplayName(module)}|{RouteModuleMass(module):0.###}";
+            if (!groups.TryGetValue(key, out var group))
+            {
+                group = new RoutePendingModuleGroup { Sample = module };
+                groups[key] = group;
+            }
+            group.Indexes.Add(index);
+        }
+
+        return groups.Values
+            .OrderBy(group => RouteModuleDisplayName(group.Sample), StringComparer.OrdinalIgnoreCase)
+            .ThenByDescending(group => group.Count)
+            .ToList();
+    }
+
+    private static void AddHorizontalDottedDropLines(GameObject host, Color color)
+    {
+        if (host == null)
+            return;
+
+        const int horizontalDots = 30;
+        for (var i = 0; i < horizontalDots; i++)
+        {
+            var x = (i + 0.5f) / horizontalDots;
+            AddDottedDropBorderDash(host.transform, new Vector2(x, 1f), new Vector2(9f, 2f), new Vector2(0f, -3f), color);
+            AddDottedDropBorderDash(host.transform, new Vector2(x, 0f), new Vector2(9f, 2f), new Vector2(0f, 3f), color);
+        }
+    }
+
+    private static void AddDottedDropBorderDash(Transform parent, Vector2 anchor, Vector2 size,
+        Vector2 anchoredPosition, Color color)
+    {
+        var dash = new GameObject("DropBorderDash", typeof(RectTransform), typeof(Image), typeof(LayoutElement));
+        dash.transform.SetParent(parent, false);
+        var layout = dash.GetComponent<LayoutElement>();
+        layout.ignoreLayout = true;
+        var image = dash.GetComponent<Image>();
+        image.color = WithAlpha(color, 0.72f);
+        image.raycastTarget = false;
+        var rt = dash.GetComponent<RectTransform>();
+        rt.anchorMin = anchor;
+        rt.anchorMax = anchor;
+        rt.pivot = new Vector2(0.5f, 0.5f);
+        rt.sizeDelta = size;
+        rt.anchoredPosition = anchoredPosition;
+    }
+
+    private static string RouteModuleDisplayName(Data.GhostFlightModuleRecord module)
+    {
+        var descriptor = Data.LogisticsNetwork.ResolveSpaceModuleDescriptor(module?.moduleId);
+        var name = !string.IsNullOrWhiteSpace(module?.displayName)
+            ? module.displayName
+            : !string.IsNullOrWhiteSpace(descriptor?.Name)
+            ? descriptor.Name
+            : module?.moduleId ?? "Module";
+        return NormalizeAssetDisplayName(name);
+    }
+
+    private static string RouteModuleIcon(Data.GhostFlightModuleRecord module)
+    {
+        var descriptor = Data.LogisticsNetwork.ResolveSpaceModuleDescriptor(module?.moduleId);
+        var icon = RouteFacilityLaunchDescriptorIcon(descriptor);
+        return string.IsNullOrWhiteSpace(icon) ? "[M]" : icon;
+    }
+
+    private static double RouteModuleMass(Data.GhostFlightModuleRecord module)
+    {
+        if (module == null)
+            return 0.0;
+        if (module.mass > 0.001)
+            return module.mass;
+
+        var descriptor = Data.LogisticsNetwork.ResolveSpaceModuleDescriptor(module.moduleId);
+        var player = MonoBehaviourSingleton<GameManager>.Instance?.Player;
+        return Math.Max(0.0, descriptor?.GetMass(player) ?? 0.0);
+    }
+
     private static string CleanRouteStatus(string status, Data.LogisticsRouteRecord route = null)
     {
         if (string.IsNullOrWhiteSpace(status))
             return "";
-        var cleaned = status.Trim();
+        var cleaned = ReplaceResourceIdsInStatus(status.Trim());
         if (cleaned.StartsWith("No idle logistics vessel", System.StringComparison.OrdinalIgnoreCase)
             || cleaned.StartsWith("No idle logistics vessels", System.StringComparison.OrdinalIgnoreCase))
             return "No idle vessels";
@@ -3072,6 +3697,68 @@ public class LogisticsUI : MonoBehaviour
         var destination = ObjectName(route.destinationObjectId);
         var compact = CompactRouteLane(route);
         return ReplaceRawRouteText(cleaned, source, destination, compact);
+    }
+
+    private static string ReplaceResourceIdsInStatus(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return text ?? "";
+
+        StringBuilder builder = null;
+        var lastAppend = 0;
+        for (var i = 0; i < text.Length;)
+        {
+            if (!IsResourceIdTokenStart(text, i))
+            {
+                i++;
+                continue;
+            }
+
+            var end = i + 1;
+            while (end < text.Length && IsResourceIdTokenChar(text[end]))
+                end++;
+
+            var token = text.Substring(i, end - i);
+            if (!LooksLikeResourceId(token))
+            {
+                i = end;
+                continue;
+            }
+
+            var replacement = ResourceLabel(ResolveResource(token), token);
+            if (string.IsNullOrWhiteSpace(replacement)
+                || string.Equals(replacement, token, System.StringComparison.Ordinal))
+            {
+                i = end;
+                continue;
+            }
+
+            builder ??= new StringBuilder(text.Length + 24);
+            builder.Append(text, lastAppend, i - lastAppend);
+            builder.Append(replacement);
+            lastAppend = end;
+            i = end;
+        }
+
+        if (builder == null)
+            return text;
+
+        builder.Append(text, lastAppend, text.Length - lastAppend);
+        return builder.ToString();
+    }
+
+    private static bool IsResourceIdTokenStart(string text, int index)
+    {
+        if (string.IsNullOrEmpty(text) || index < 0 || index >= text.Length)
+            return false;
+        if (index > 0 && IsResourceIdTokenChar(text[index - 1]))
+            return false;
+        return char.IsLetter(text[index]);
+    }
+
+    private static bool IsResourceIdTokenChar(char value)
+    {
+        return char.IsLetterOrDigit(value) || value == '_';
     }
 
     private void AddRouteHealthRow(LogisticsSection section, Data.LogisticsRouteRecord route)
@@ -3106,7 +3793,9 @@ public class LogisticsUI : MonoBehaviour
 
         var rules = route.resources?.Where(rule => rule != null).ToList() ?? new List<Data.LogisticsRouteResourceRule>();
         if (rules.Count == 0)
-            return "No resources configured";
+            return (route.pendingModules?.Any(module => module != null) == true)
+                ? "Module cargo queued"
+                : "No resources configured";
 
         var activeRules = rules.Where(rule => rule.isActive).ToList();
         if (activeRules.Count == 0)
@@ -3494,6 +4183,7 @@ public class LogisticsUI : MonoBehaviour
         {
             ShowRouteEditor(section, route);
         });
+        AddVerticalSpacer(section.ContentArea, RouteCountEditorBackGap);
 
         if (route == null || string.IsNullOrWhiteSpace(typeId))
         {
@@ -3507,7 +4197,7 @@ public class LogisticsUI : MonoBehaviour
         var player = MonoBehaviourSingleton<GameManager>.Instance?.Player;
         if (source == null || player == null)
         {
-            section.AddTextRow("Route source is unavailable.", _font, 13f, DisabledTextColor);
+            AddRouteCountEditorTextRow(section.ContentArea, "Route source is unavailable.", 13f, DisabledTextColor);
             RebuildSectionLayout(section);
             return;
         }
@@ -3525,12 +4215,13 @@ public class LogisticsUI : MonoBehaviour
             ? assigned.Count
             : Mathf.Clamp(desiredCount, locked, max);
 
-        var title = MakeTMP(section.ContentArea, GhostShipTypeName(typeId), 14f, EngineAccentColor);
-        title.rectTransform.sizeDelta = new Vector2(0, 22);
+        AddRouteCountEditorTextRow(section.ContentArea, GhostShipTypeName(typeId), 14f, EngineAccentColor, 24f);
 
-        section.AddTextRow($"Assigned {assigned.Count}  available {adoptable.Count}", _font, 12.5f, SubtleTextColor);
+        AddRouteCountEditorTextRow(section.ContentArea, $"Assigned {assigned.Count}  available {adoptable.Count}",
+            12.5f, SubtleTextColor);
         if (locked > 0)
-            section.AddTextRow($"{locked} craft busy; minimum count is {locked}.", _font, 12.5f, WarningColor);
+            AddRouteCountEditorTextRow(section.ContentArea, $"{locked} craft busy; minimum count is {locked}.",
+                12.5f, WarningColor);
 
         var row = MakeHLRow(section.ContentArea, 28f, 6);
         row.GetComponent<Image>().color = _runtimeStyle.RowBackgroundColor;
@@ -3567,6 +4258,9 @@ public class LogisticsUI : MonoBehaviour
             ShowRouteEditor(section, route);
         });
         AddBigButtonInline(confirmRow.transform, "Cancel", _runtimeStyle.BackButtonColor, () => ShowRouteEditor(section, route));
+        AddRouteCountEditorTextRow(section.ContentArea,
+            "Ships assigned to this route leave the local available fleet. Lower the count to return idle ships.",
+            12.5f, WarningColor, 38f, true);
 
         RebuildSectionLayout(section);
     }
@@ -3830,20 +4524,15 @@ public class LogisticsUI : MonoBehaviour
         var iconColor = RouteFacilityLaunchIconColor(enabled, available);
         if (option?.IconSprite != null)
         {
-            var iconGo = new GameObject("Icon", typeof(RectTransform), typeof(Image), typeof(LayoutElement));
-            iconGo.transform.SetParent(btnGo.transform, false);
-            var iconImage = iconGo.GetComponent<Image>();
-            iconImage.sprite = option.IconSprite;
-            iconImage.color = iconColor;
-            iconImage.preserveAspect = true;
-            iconImage.raycastTarget = false;
-            ApplyRouteFacilityLaunchIconLayout(iconGo);
+            AddFixedIconImage(btnGo.transform, "Icon", option.IconSprite, RouteFacilityLaunchIconColumnWidth,
+                RouteFacilityLaunchOptionHeight - (RouteFacilityLaunchTileVerticalPadding * 2f), iconColor);
         }
         else
         {
             var iconText = string.IsNullOrWhiteSpace(option?.Icon)
                 ? RouteFacilityLaunchFallbackIcon(option?.Category)
                 : option.Icon;
+            iconText = NormalizeLogisticsIconText(iconText, LogisticsTableIconSpritePercent);
             iconText = TintRouteFacilityLaunchIcon(iconText, iconColor);
             var icon = MakeTMP(btnGo.transform, iconText, RouteFacilityLaunchIconFontSize(iconText), iconColor);
             icon.alignment = TextAlignmentOptions.Center;
@@ -4771,6 +5460,7 @@ public class LogisticsUI : MonoBehaviour
         {
             ShowRouteEditor(section, route);
         });
+        AddVerticalSpacer(section.ContentArea, RouteCountEditorBackGap);
 
         if (route == null || string.IsNullOrWhiteSpace(typeId))
         {
@@ -4784,7 +5474,7 @@ public class LogisticsUI : MonoBehaviour
         var player = MonoBehaviourSingleton<GameManager>.Instance?.Player;
         if (source == null || player == null)
         {
-            section.AddTextRow("Route source is unavailable.", _font, 13f, DisabledTextColor);
+            AddRouteCountEditorTextRow(section.ContentArea, "Route source is unavailable.", 13f, DisabledTextColor);
             RebuildSectionLayout(section);
             return;
         }
@@ -4807,12 +5497,13 @@ public class LogisticsUI : MonoBehaviour
             ? assigned.Count
             : Mathf.Clamp(desiredCount, locked, max);
 
-        var title = MakeTMP(section.ContentArea, LaunchVehicleTypeName(typeId), 14f, EngineAccentColor);
-        title.rectTransform.sizeDelta = new Vector2(0, 22);
+        AddRouteCountEditorTextRow(section.ContentArea, LaunchVehicleTypeName(typeId), 14f, EngineAccentColor, 24f);
 
-        section.AddTextRow($"Assigned {assigned.Count}  available {reservable.Count}", _font, 12.5f, SubtleTextColor);
+        AddRouteCountEditorTextRow(section.ContentArea, $"Assigned {assigned.Count}  available {reservable.Count}",
+            12.5f, SubtleTextColor);
         if (locked > 0)
-            section.AddTextRow($"{locked} launch vehicles busy; minimum count is {locked}.", _font, 12.5f, WarningColor);
+            AddRouteCountEditorTextRow(section.ContentArea, $"{locked} launch vehicles busy; minimum count is {locked}.",
+                12.5f, WarningColor);
 
         var row = MakeHLRow(section.ContentArea, 28f, 6);
         row.GetComponent<Image>().color = _runtimeStyle.RowBackgroundColor;
@@ -4963,7 +5654,7 @@ public class LogisticsUI : MonoBehaviour
         section.ClearContent();
         var sourceKeep = 0d;
         var destinationTarget = 0d;
-        var editingKeep = true;
+        var editingKeep = false;
         var isActive = true;
         var priority = 0;
         var isEditing = route?.resources != null && editIndex >= 0 && editIndex < route.resources.Count;
@@ -5045,18 +5736,18 @@ public class LogisticsUI : MonoBehaviour
                 targetButtonLabel.text = $"Target: {FormatNiceAmount(destinationTarget)}";
         }
 
-        keepButton = AddBigButtonInline(editRow.transform, "", _runtimeStyle.ToggleOffColor, () =>
-        {
-            editingKeep = true;
-            RefreshAmount();
-        });
-        keepButtonLabel = keepButton.GetComponentInChildren<TextMeshProUGUI>();
         targetButton = AddBigButtonInline(editRow.transform, "", _runtimeStyle.ToggleOffColor, () =>
         {
             editingKeep = false;
             RefreshAmount();
         });
         targetButtonLabel = targetButton.GetComponentInChildren<TextMeshProUGUI>();
+        keepButton = AddBigButtonInline(editRow.transform, "", _runtimeStyle.ToggleOffColor, () =>
+        {
+            editingKeep = true;
+            RefreshAmount();
+        });
+        keepButtonLabel = keepButton.GetComponentInChildren<TextMeshProUGUI>();
 
         var amountRow = MakeHLRow(section.ContentArea, 34f, 0);
         amountDisplay = MakeTMP(amountRow.transform, "", 22f, Color.white);
@@ -5431,7 +6122,7 @@ public class LogisticsUI : MonoBehaviour
 
         var flightsSection = CreateInlineSection(section.ContentArea, "FLIGHTS", "Route Traffic");
         AddGhostFlightTableHeader(flightsSection);
-        AddVirtualGhostFlightTableRows(flightsSection, ghostFlights);
+        AddVirtualGhostFlightTableRows(flightsSection, section, route, ghostFlights);
     }
 
     private void AddGhostFlightTableHeader(LogisticsSection section)
@@ -5447,25 +6138,33 @@ public class LogisticsUI : MonoBehaviour
     private void AddGhostFlightTableRow(LogisticsSection section, Data.GhostFlightRecord flight)
     {
         var row = MakeVLRow(section.ContentArea, GhostFlightRowHeight, 0f);
-        PopulateGhostFlightTableRow(row, flight);
+        PopulateGhostFlightTableRow(row, section, null, flight);
     }
 
-    private void AddVirtualGhostFlightTableRows(LogisticsSection section, List<Data.GhostFlightRecord> flights)
+    private void AddVirtualGhostFlightTableRows(LogisticsSection section, LogisticsSection routePageSection,
+        Data.LogisticsRouteRecord route, List<Data.GhostFlightRecord> flights)
     {
         if (section == null || flights == null || flights.Count == 0)
             return;
 
         AddVirtualFixedList(section.ContentArea, "GhostFlightVirtualList", flights.Count, GhostFlightRowHeight,
             (parent, height) => MakeVirtualVLRow(parent, height, 0f),
-            (row, index) => PopulateGhostFlightTableRow(row, flights[index]));
+            (row, index) => PopulateGhostFlightTableRow(row, routePageSection ?? section, route, flights[index]));
     }
 
-    private void PopulateGhostFlightTableRow(GameObject row, Data.GhostFlightRecord flight)
+    private void PopulateGhostFlightTableRow(GameObject row, LogisticsSection section, Data.LogisticsRouteRecord route,
+        Data.GhostFlightRecord flight)
     {
         if (row == null || flight == null)
             return;
 
         row.GetComponent<Image>().color = RowBgMutedColor;
+        var rowButton = MakeRowButton(row);
+        if (rowButton != null)
+        {
+            rowButton.onClick.RemoveAllListeners();
+            rowButton.onClick.AddListener(() => ShowRouteFlightDetail(section, route, flight));
+        }
 
         var topLine = MakeHLContainer(row.transform, 22f, 4f);
         AddTableCell(topLine.transform, GhostFlightCraftName(flight), 68f, 12f, SecondaryTextColor);
@@ -5478,7 +6177,7 @@ public class LogisticsUI : MonoBehaviour
 
         var manifestLine = MakeHLContainer(row.transform, 18f, 4f);
         AddSpacer(manifestLine.transform, 72f);
-        var cargo = BuildGhostFlightCargoLabel(flight);
+        var cargo = BuildGhostFlightCargoLabel(flight, compactModules: true);
         var manifestText = string.IsNullOrWhiteSpace(cargo) ? "<alpha=#00>.</alpha>" : cargo;
         var manifestLabel = AddTableCell(manifestLine.transform, manifestText, 0f, 11.5f, SecondaryTextColor,
             TextAlignmentOptions.MidlineLeft, true, false);
@@ -5488,11 +6187,143 @@ public class LogisticsUI : MonoBehaviour
     private string BuildGhostFlightLabel(Data.GhostFlightRecord flight)
     {
         var craft = GhostFlightCraftName(flight);
-        var cargo = BuildGhostFlightCargoLabel(flight);
+        var cargo = BuildGhostFlightCargoLabel(flight, compactModules: true);
         var fuel = BuildGhostFlightFuelLabel(flight);
         var fuelPart = string.IsNullOrWhiteSpace(fuel) ? "" : $"  {fuel}";
         var routeLine = $"{craft}: {CompactRouteLane(flight.fromObjectId, flight.toObjectId)}{fuelPart}  {flight.arrivalDate:yyyy.MM.dd}";
         return string.IsNullOrWhiteSpace(cargo) ? $"{routeLine}\n<alpha=#00>.</alpha>" : $"{routeLine}\n{cargo}";
+    }
+
+    private void ShowRouteFlightDetail(LogisticsSection section, Data.LogisticsRouteRecord route,
+        Data.GhostFlightRecord flight)
+    {
+        if (section == null)
+            return;
+
+        section.ClearContent();
+        if (route == null || flight == null)
+        {
+            ClearActiveRouteFlightDetail();
+            AddBigButton(section.ContentArea, "<- Back", _runtimeStyle.BackButtonColor, () =>
+            {
+                if (route != null)
+                    ShowRouteEditor(section, route);
+                else
+                    BuildRoutesSection();
+            });
+            section.AddTextRow("Flight record is unavailable.", _font, 13f, DisabledTextColor);
+            RebuildSectionLayout(section);
+            return;
+        }
+
+        _activeRouteEditorRouteId = route.routeId;
+        _activeRouteFlightDetailRouteId = route.routeId;
+        _activeRouteFlightDetailId = flight.flightId;
+        SetRouteEditorMainPageVisible(false);
+        ShowPopupRouteSubheader(section, route);
+
+        AddBigButton(section.ContentArea, "<- Back", _runtimeStyle.BackButtonColor, () =>
+        {
+            ClearActiveRouteFlightDetail();
+            ShowRouteEditor(section, route);
+        });
+
+        var summary = CreateInlineSection(section.ContentArea, "FLIGHT", "Record");
+        AddFlightDetailRow(summary.ContentArea, "Flight ID", ShortFlightId(flight.flightId));
+        AddFlightDetailRow(summary.ContentArea, "Status", flight.status.ToString());
+        AddFlightDetailRow(summary.ContentArea, "Type", flight.isReturnFlight ? "Return" : "Outbound");
+        AddFlightDetailRow(summary.ContentArea, "Route", CompactRouteLane(flight.fromObjectId, flight.toObjectId));
+        AddFlightDetailRow(summary.ContentArea, "Ships", BuildGhostFlightCraftDetailLabel(flight));
+        AddFlightDetailRow(summary.ContentArea, "Departure", FormatFlightDate(flight.departureDate));
+        AddFlightDetailRow(summary.ContentArea, "Arrival", FormatFlightDate(flight.arrivalDate));
+        AddFlightDetailRow(summary.ContentArea, "Outbound days", FormatRecordedDays(flight.outboundTravelDays));
+        if (!flight.isReturnFlight)
+            AddFlightDetailRow(summary.ContentArea, "Return days", FormatRecordedDays(flight.returnTravelDays));
+
+        var cargoSection = CreateInlineSection(section.ContentArea, "PAYLOAD", "Manifest");
+        AddFlightDetailRow(cargoSection.ContentArea, "Cargo manifest", BuildGhostFlightCargoLabel(flight), wrap: true);
+        AddFlightDetailRow(cargoSection.ContentArea, "Cargo payload mass", FormatRecordedTons(GetGhostFlightCargoPayloadMass(flight)));
+        AddFlightDetailRow(cargoSection.ContentArea, "Launch payload mass", FormatRecordedTons(flight.launchPayloadMass));
+        foreach (var cargo in flight.cargoManifest ?? new List<Data.GhostFlightCargoRecord>())
+        {
+            if (cargo == null || string.IsNullOrWhiteSpace(cargo.resourceId) || cargo.cargoAmount <= 0)
+                continue;
+            AddFlightDetailRow(cargoSection.ContentArea,
+                ResourceLabel(ResolveResource(cargo.resourceId), cargo.resourceId),
+                $"{FormatNiceAmount(cargo.cargoAmount)} cargo"
+                + (cargo.supplyConsumed > 0 ? $" + {FormatNiceAmount(cargo.supplyConsumed)} supplies" : ""));
+        }
+        foreach (var group in BuildRouteModuleDisplayGroups(flight.moduleManifest))
+        {
+            var value = group.Count > 1
+                ? $"{group.Count} x {FormatRecordedTons(group.Mass)} module cargo"
+                : $"{FormatRecordedTons(group.Mass)} module cargo";
+            AddFlightDetailRow(cargoSection.ContentArea, group.Name, value);
+        }
+
+        var fuelSection = CreateInlineSection(section.ContentArea, "FUEL", "Stored Breakdown");
+        AddFlightDetailRow(fuelSection.ContentArea, "Flight row total", BuildGhostFlightFuelLabel(flight));
+        AddFlightDetailRow(fuelSection.ContentArea, "Outbound ship fuel", FormatFuelAmount(flight.fuelResourceId, flight.outboundFuel));
+        if (flight.tankFuelDelivered > 0.001 || flight.cargoHoldFuelDelivered > 0.001)
+        {
+            var tankDeliveryResourceId = string.IsNullOrWhiteSpace(flight.tankFuelDeliveryResourceId)
+                ? flight.fuelResourceId
+                : flight.tankFuelDeliveryResourceId;
+            AddFlightDetailRow(fuelSection.ContentArea, "Tank fuel delivered",
+                FormatFuelAmount(tankDeliveryResourceId, flight.tankFuelDelivered));
+            AddFlightDetailRow(fuelSection.ContentArea, "Cargo hold fuel",
+                FormatFuelAmount(tankDeliveryResourceId, flight.cargoHoldFuelDelivered));
+        }
+        AddFlightDetailRow(fuelSection.ContentArea, "Launch fuel", BuildGhostFlightLaunchFuelLabel(flight));
+        AddFlightDetailRow(fuelSection.ContentArea, "Outbound + launch", FormatFuelAmount(flight.fuelResourceId, GetGhostFlightOutboundLaunchFuel(flight)));
+        if (!flight.isReturnFlight)
+        {
+            AddFlightDetailRow(fuelSection.ContentArea, "Return ship fuel", FormatFuelAmount(flight.fuelResourceId, flight.returnFuel));
+            AddFlightDetailRow(fuelSection.ContentArea, "Return fuel source", flight.destinationRefuel
+                ? $"reserved at {ObjectName(flight.toObjectId)}"
+                : "carried from origin tank");
+            AddFlightDetailRow(fuelSection.ContentArea, "Reserved return fuel", FormatFuelAmount(flight.fuelResourceId, flight.reservedReturnFuel));
+            AddFlightDetailRow(fuelSection.ContentArea, "Round-trip fuel plan", FormatFuelAmount(flight.fuelResourceId,
+                GetGhostFlightRoundTripFuel(flight)));
+        }
+
+        var calcSection = CreateInlineSection(section.ContentArea, "CALC", "Inputs");
+        AddFlightDetailRow(calcSection.ContentArea, "Outbound mode", flight.outboundFlightPlanMode.ToString());
+        AddFlightDetailRow(calcSection.ContentArea, "Outbound route kind", EmptyFallback(flight.outboundRouteKind));
+        AddFlightDetailRow(calcSection.ContentArea, "Outbound delta-v", FormatRecordedNumber(flight.outboundDeltaV));
+        AddFlightDetailRow(calcSection.ContentArea, "Outbound available dV", FormatRecordedNumber(flight.outboundAvailableDeltaV));
+        if (!flight.isReturnFlight)
+        {
+            AddFlightDetailRow(calcSection.ContentArea, "Return mode", flight.returnFlightPlanMode.ToString());
+            AddFlightDetailRow(calcSection.ContentArea, "Return route kind", EmptyFallback(flight.returnRouteKind));
+            AddFlightDetailRow(calcSection.ContentArea, "Return delta-v", FormatRecordedNumber(flight.returnDeltaV));
+            AddFlightDetailRow(calcSection.ContentArea, "Return available dV", FormatRecordedNumber(flight.returnAvailableDeltaV));
+        }
+        AddFlightDetailRow(calcSection.ContentArea, "Craft count", FormatRecordedCount(flight.dispatchCraftCount, GhostFlightCraftIds(flight).Count));
+        AddFlightDetailRow(calcSection.ContentArea, "Dry mass / craft", FormatRecordedTons(flight.dryMassPerCraft));
+        AddFlightDetailRow(calcSection.ContentArea, "Outbound mass-to-fuel", FormatRecordedTons(flight.outboundMassToFuel));
+        AddFlightDetailRow(calcSection.ContentArea, "Return mass-to-fuel", FormatRecordedTons(flight.returnMassToFuel));
+        AddFlightDetailRow(calcSection.ContentArea, "Exhaust velocity", FormatRecordedNumber(flight.exhaustVelocity));
+        AddFlightDetailRow(calcSection.ContentArea, "Fuel exponent", FormatRecordedNumber(flight.fuelPowVariable));
+
+        var tankSection = CreateInlineSection(section.ContentArea, "TANK", "Dispatch State");
+        AddFlightDetailRow(tankSection.ContentArea, "Tank capacity", FormatRecordedTons(flight.tankCapacity));
+        AddFlightDetailRow(tankSection.ContentArea, "Tank before top-up", FormatRecordedTons(flight.tankFuelBeforeLaunch));
+        AddFlightDetailRow(tankSection.ContentArea, "Origin top-up", FormatRecordedTons(flight.originFuelTopUp));
+        AddFlightDetailRow(tankSection.ContentArea, "Tank at departure", FormatRecordedTons(flight.tankFuelAtDeparture));
+        AddFlightDetailRow(tankSection.ContentArea, "Tank after outbound", FormatRecordedTons(flight.tankFuelAfterOutbound));
+        if (flight.tankFuelDelivered > 0.001 || flight.tankFuelReservedForReturn > 0.001)
+        {
+            AddFlightDetailRow(tankSection.ContentArea, "Outbound burn bucket", FormatRecordedTons(flight.tankFuelReservedForOutbound));
+            AddFlightDetailRow(tankSection.ContentArea, "Carried return reserve", FormatRecordedTons(flight.tankFuelReservedForReturn));
+            AddFlightDetailRow(tankSection.ContentArea, "Tank after unload", FormatRecordedTons(flight.tankFuelAtArrivalAfterUnload));
+        }
+
+        var launchSection = CreateInlineSection(section.ContentArea, "LAUNCH", "Support");
+        AddFlightDetailRow(launchSection.ContentArea, "Launch fuel resources", BuildGhostFlightLaunchFuelLabel(flight), wrap: true);
+        AddFlightDetailRow(launchSection.ContentArea, "Launch support", BuildGhostFlightLaunchSupportLabel(flight), wrap: true);
+
+        RebuildSectionLayout(section);
     }
 
     private static string BuildGhostFlightFuelLabel(Data.GhostFlightRecord flight)
@@ -5500,7 +6331,7 @@ public class LogisticsUI : MonoBehaviour
         if (flight == null)
             return "";
 
-        var fuel = Math.Max(0, flight.outboundFuel);
+        var fuel = GetGhostFlightRoundTripFuel(flight);
         if (fuel <= 0.001)
             return "";
 
@@ -5508,25 +6339,208 @@ public class LogisticsUI : MonoBehaviour
         return $"{CompactResourceLabel(rd, flight.fuelResourceId)}x{FormatNiceAmount(fuel)}";
     }
 
-    private static string BuildGhostFlightCargoLabel(Data.GhostFlightRecord flight)
+    private static double GetGhostFlightOutboundLaunchFuel(Data.GhostFlightRecord flight)
+    {
+        if (flight == null)
+            return 0.0;
+        return Math.Max(0.0, flight.outboundFuel) + Math.Max(0.0, flight.launchFuel);
+    }
+
+    private static double GetGhostFlightRoundTripFuel(Data.GhostFlightRecord flight)
+    {
+        if (flight == null)
+            return 0.0;
+        return GetGhostFlightOutboundLaunchFuel(flight) + Math.Max(0.0, flight.returnFuel);
+    }
+
+    private void AddFlightDetailRow(Transform parent, string label, string value, Color? valueColor = null, bool wrap = false)
+    {
+        var row = MakeHLRow(parent, wrap ? 40f : 24f, 6f);
+        AddTableCell(row.transform, label ?? "", 168f, 11.5f, TertiaryTextColor);
+        var valueLabel = AddTableCell(row.transform, string.IsNullOrWhiteSpace(value) ? "not recorded" : value, 0f,
+            12.2f, valueColor ?? PrimaryTextColor, TextAlignmentOptions.MidlineLeft, true, wrap);
+        if (wrap)
+        {
+            valueLabel.enableWordWrapping = true;
+            valueLabel.overflowMode = TextOverflowModes.Overflow;
+        }
+    }
+
+    private static string ShortFlightId(string flightId)
+    {
+        if (string.IsNullOrWhiteSpace(flightId))
+            return "not recorded";
+        return flightId.Length <= 10 ? flightId : flightId.Substring(0, 10);
+    }
+
+    private static string FormatFlightDate(DateTime value)
+    {
+        return value == default ? "not recorded" : value.ToString("yyyy.MM.dd");
+    }
+
+    private static string EmptyFallback(string value)
+    {
+        return string.IsNullOrWhiteSpace(value) ? "not recorded" : value;
+    }
+
+    private static string FormatRecordedNumber(double value)
+    {
+        return value > 0.001 && !double.IsNaN(value) && !double.IsInfinity(value)
+            ? value.ToString("0.###")
+            : "not recorded";
+    }
+
+    private static string FormatRecordedTons(double value)
+    {
+        return value > 0.001 && !double.IsNaN(value) && !double.IsInfinity(value)
+            ? FormatNiceAmount(value)
+            : "not recorded";
+    }
+
+    private static string FormatRecordedDays(double value)
+    {
+        return value > 0.001 && !double.IsNaN(value) && !double.IsInfinity(value)
+            ? $"{value:0.###} days"
+            : "not recorded";
+    }
+
+    private static string FormatRecordedCount(int recorded, int fallback)
+    {
+        var count = recorded > 0 ? recorded : fallback;
+        return count > 0 ? count.ToString() : "not recorded";
+    }
+
+    private static string FormatFuelAmount(string resourceId, double amount)
+    {
+        if (amount <= 0.001 || double.IsNaN(amount) || double.IsInfinity(amount))
+            return "0T";
+
+        var rd = ResolveResource(resourceId);
+        return $"{CompactResourceLabel(rd, resourceId)}x{FormatNiceAmount(amount)}";
+    }
+
+    private static string BuildGhostFlightLaunchFuelLabel(Data.GhostFlightRecord flight)
+    {
+        if (flight == null)
+            return "0T";
+
+        var manifest = flight.launchFuelManifest?
+            .Where(item => item != null
+                && !string.IsNullOrWhiteSpace(item.resourceId)
+                && item.cargoAmount > 0.001)
+            .ToList() ?? new List<Data.GhostFlightCargoRecord>();
+        if (manifest.Count == 0)
+            return FormatFuelAmount(flight.fuelResourceId, flight.launchFuel);
+
+        return string.Join(", ", manifest
+            .OrderBy(item => ResourceSortName(ResolveResource(item.resourceId), item.resourceId), System.StringComparer.OrdinalIgnoreCase)
+            .Select(item => $"{CompactResourceLabel(ResolveResource(item.resourceId), item.resourceId)}x{FormatNiceAmount(item.cargoAmount)}"));
+    }
+
+    private static string BuildGhostFlightLaunchSupportLabel(Data.GhostFlightRecord flight)
+    {
+        var labels = flight?.launchSupportLabels?
+            .Where(label => !string.IsNullOrWhiteSpace(label))
+            .Distinct()
+            .OrderBy(label => label, System.StringComparer.OrdinalIgnoreCase)
+            .ToList() ?? new List<string>();
+        return labels.Count == 0 ? "not recorded" : string.Join(", ", labels);
+    }
+
+    private static double GetGhostFlightCargoPayloadMass(Data.GhostFlightRecord flight)
+    {
+        if (flight == null)
+            return 0.0;
+        if (flight.cargoPayloadMass > 0.001)
+            return flight.cargoPayloadMass;
+        var resourceMass = flight.cargoManifest?
+            .Where(item => item != null)
+            .Sum(item => Math.Max(0.0, item.cargoAmount) + Math.Max(0.0, item.supplyConsumed)) ?? 0.0;
+        var moduleMass = flight.moduleManifest?
+            .Where(item => item != null)
+            .Sum(RouteModuleMass) ?? 0.0;
+        return resourceMass + moduleMass;
+    }
+
+    private static string BuildGhostFlightCraftDetailLabel(Data.GhostFlightRecord flight)
+    {
+        if (flight == null)
+            return "not recorded";
+
+        var craftIds = GhostFlightCraftIds(flight);
+        var craftRecords = craftIds
+            .Select(Data.LogisticsNetwork.FindGhostCraft)
+            .Where(craft => craft != null)
+            .ToList();
+        if (craftRecords.Count == 0)
+            return GhostFlightCraftName(flight);
+
+        var parts = craftRecords
+            .GroupBy(craft => craft.shipTypeId ?? "")
+            .Select(group => $"{GhostShipName(group.Key)} x{group.Count()}")
+            .ToList();
+        return string.Join(", ", parts);
+    }
+
+    private static string BuildGhostFlightCargoLabel(Data.GhostFlightRecord flight, bool compactModules = false)
     {
         var manifest = flight?.cargoManifest?
             .Where(item => item != null
                 && !string.IsNullOrWhiteSpace(item.resourceId)
                 && item.cargoAmount > 0)
             .ToList() ?? new List<Data.GhostFlightCargoRecord>();
-        if (manifest.Count == 0)
+        var moduleGroups = BuildRouteModuleDisplayGroups(flight?.moduleManifest);
+        if (manifest.Count == 0 && moduleGroups.Count == 0)
             return "";
 
         var parts = manifest
             .OrderBy(item => ResourceSortName(ResolveResource(item.resourceId), item.resourceId), System.StringComparer.OrdinalIgnoreCase)
             .Select(item => $"{CompactResourceLabel(ResolveResource(item.resourceId), item.resourceId)}x{FormatNiceAmount(item.cargoAmount)}")
             .ToList();
+        parts.AddRange(moduleGroups
+            .Select(group => compactModules
+                ? $"{group.Icon}x{group.Count}"
+                : $"{group.Icon} {group.Name} x{group.Count}"));
         var cargo = string.Join(", ", parts);
         var supplyConsumed = manifest.Sum(item => System.Math.Max(0, item.supplyConsumed));
         if (supplyConsumed > 0)
             cargo += $", {CompactResourceLabel(ResolveSupplyResource())}x{FormatNiceAmount(supplyConsumed)}";
         return cargo;
+    }
+
+    private static List<RouteModuleDisplayGroup> BuildRouteModuleDisplayGroups(
+        IEnumerable<Data.GhostFlightModuleRecord> modules)
+    {
+        var groups = new Dictionary<string, RouteModuleDisplayGroup>(StringComparer.Ordinal);
+        foreach (var module in modules ?? Enumerable.Empty<Data.GhostFlightModuleRecord>())
+        {
+            if (module == null)
+                continue;
+
+            var name = RouteModuleDisplayName(module);
+            var icon = RouteModuleIcon(module);
+            var mass = RouteModuleMass(module);
+            var moduleId = module.moduleId ?? "";
+            var key = $"{moduleId}|{name}|{icon}|{mass:0.###}";
+            if (!groups.TryGetValue(key, out var group))
+            {
+                group = new RouteModuleDisplayGroup
+                {
+                    Sample = module,
+                    ModuleId = moduleId,
+                    Name = name,
+                    Icon = icon,
+                    Mass = mass
+                };
+                groups[key] = group;
+            }
+            group.Count++;
+        }
+
+        return groups.Values
+            .OrderBy(group => group.Name, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(group => group.ModuleId, StringComparer.OrdinalIgnoreCase)
+            .ToList();
     }
 
     private static double GhostFlightCargoAmount(Data.GhostFlightRecord flight, ResourceDefinition rd)
@@ -5966,6 +6980,30 @@ public class LogisticsUI : MonoBehaviour
         return row;
     }
 
+    private TextMeshProUGUI AddRouteCountEditorTextRow(Transform parent, string text, float fontSize, Color color,
+        float height = 22f, bool wrap = false)
+    {
+        var row = MakeHLContainer(parent, height, 0f);
+        var hlg = row.GetComponent<HorizontalLayoutGroup>();
+        if (hlg != null)
+        {
+            hlg.padding = new RectOffset(RouteCountEditorContentInset, RouteCountEditorContentInset, 0, 0);
+            hlg.childAlignment = wrap ? TextAnchor.UpperLeft : TextAnchor.MiddleLeft;
+        }
+
+        var label = AddTableCell(row.transform, text, 0f, fontSize, color,
+            wrap ? TextAlignmentOptions.TopLeft : TextAlignmentOptions.MidlineLeft, true, wrap);
+        var layout = label.GetComponent<LayoutElement>();
+        if (layout != null)
+        {
+            layout.minHeight = Mathf.Max(18f, height);
+            layout.preferredHeight = height;
+            layout.flexibleHeight = 0f;
+        }
+
+        return label;
+    }
+
     private Button MakeRowButton(GameObject row)
     {
         if (row == null)
@@ -6009,19 +7047,22 @@ public class LogisticsUI : MonoBehaviour
         return label;
     }
 
-    private TextMeshProUGUI AddTableIconCell(Transform parent, string icon)
+    private TextMeshProUGUI AddTableIconCell(Transform parent, string icon, float fontSize = 18f, float height = 24f,
+        float iconSizePercent = LogisticsTableIconSpritePercent)
     {
-        var label = AddTableCell(parent, icon, RouteAssetIconColumnWidth, 18f, PrimaryTextColor, TextAlignmentOptions.Midline);
+        var label = AddTableCell(parent, NormalizeLogisticsIconText(icon, iconSizePercent), RouteAssetIconColumnWidth,
+            fontSize, PrimaryTextColor, TextAlignmentOptions.Midline);
         label.enableWordWrapping = false;
         label.overflowMode = TextOverflowModes.Overflow;
+        label.margin = Vector4.zero;
         label.rectTransform.offsetMin = new Vector2(0, 0);
         label.rectTransform.offsetMax = new Vector2(0, 0);
 
         var layout = label.GetComponent<LayoutElement>();
         if (layout != null)
         {
-            layout.minHeight = 24f;
-            layout.preferredHeight = 24f;
+            layout.minHeight = height;
+            layout.preferredHeight = height;
         }
 
         return label;
@@ -6588,18 +7629,32 @@ public class LogisticsUI : MonoBehaviour
         return tmp;
     }
 
+    private static string NormalizeLogisticsIconText(string text, float sizePercent = LogisticsInlineIconSpritePercent)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return text ?? "";
+        if (text.IndexOf("<sprite", StringComparison.OrdinalIgnoreCase) < 0)
+            return text;
+        if (text.IndexOf("<size=", StringComparison.OrdinalIgnoreCase) >= 0)
+            return text;
+
+        var percent = Mathf.Clamp(sizePercent, 20f, 120f)
+            .ToString("0.#", System.Globalization.CultureInfo.InvariantCulture);
+        return $"<size={percent}%>{text.Trim()}</size>";
+    }
+
     private static string ResourceLabel(ResourceDefinition rd, string fallbackId = null)
     {
         var id = rd?.ID ?? fallbackId;
         if (string.IsNullOrWhiteSpace(id)) return "?";
         var name = ResourceSortName(rd, fallbackId);
-        var icon = rd?.IconString ?? "";
+        var icon = NormalizeLogisticsIconText(rd?.IconString ?? "", LogisticsInlineIconSpritePercent);
         return $"{icon} {name}".Trim();
     }
 
     private static string CompactResourceLabel(ResourceDefinition rd, string fallbackId = null)
     {
-        var icon = rd?.IconString;
+        var icon = NormalizeLogisticsIconText(rd?.IconString, LogisticsInlineIconSpritePercent);
         if (!string.IsNullOrWhiteSpace(icon))
             return icon;
         return ResourceSortName(rd, fallbackId);
@@ -6896,7 +7951,10 @@ public class LogisticsUI : MonoBehaviour
     {
         if (string.IsNullOrEmpty(spriteId)) return "";
         var objManager = MonoBehaviourSingleton<ObjectInfoManager>.Instance;
-        return objManager != null ? objManager.spriteTextStart5.MyFormat(spriteId, "") : "";
+        return objManager != null
+            ? NormalizeLogisticsIconText(objManager.spriteTextStart5.MyFormat(spriteId, ""),
+                LogisticsInlineIconSpritePercent)
+            : "";
     }
 
     public void RebuildLayout()

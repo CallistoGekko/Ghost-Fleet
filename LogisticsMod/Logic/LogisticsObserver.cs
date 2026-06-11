@@ -2,9 +2,11 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using CustomUpdate;
 using Data.ScriptableObject;
 using Game;
+using Game.ContractsObjectives;
 using Game.Info;
 using Game.ObjectInfoDataScripts;
 using Game.VisualizationScripts;
@@ -16,6 +18,8 @@ namespace LogisticsMod.Logic;
 
 public static class LogisticsObserver
 {
+    private const double HumanRoutePartialLoadMinimumFillRatio = 0.5;
+    private const double HighRoutePartialLoadMinimumFillRatio = 0.1;
     private static StreamWriter _logWriter;
     private static int _logSession;
     private static bool VerboseLogging => LogisticsMod.Plugin.VerboseLogging?.Value ?? false;
@@ -29,15 +33,20 @@ public static class LogisticsObserver
     private static readonly Dictionary<string, RequestPlanThrottleState> _requestPlanThrottle = new Dictionary<string, RequestPlanThrottleState>();
     private static readonly Dictionary<string, VirtualLiftUsageState> _virtualLiftUsage = new Dictionary<string, VirtualLiftUsageState>();
     private static readonly Dictionary<string, TrajectoryObject> _ghostFlightVisuals = new Dictionary<string, TrajectoryObject>();
+    private static readonly FieldInfo ObjectiveProgressEventField =
+        typeof(CompanyObjectiveData).GetField("OnProgress", BindingFlags.Instance | BindingFlags.NonPublic);
 
     private sealed class GhostLegPlan
     {
         public double Fuel;
         public double TravelDays;
         public double DeltaV;
+        public double AvailableDeltaV;
         public DateTime Departure;
         public DateTime Arrival;
         public ResourceDefinition FuelType;
+        public Data.LogisticsFlightPlanMode FlightPlanMode;
+        public string RouteKind;
         public string Reason;
     }
 
@@ -57,6 +66,15 @@ public static class LogisticsObserver
         public double Amount;
     }
 
+    private sealed class GhostDeliveryCargoItem
+    {
+        public ResourceDefinition Resource;
+        public double Amount;
+        public ResourceDefinition SupplyResource;
+        public double SupplyConsumed;
+        public double PayloadCargoMass;
+    }
+
     private sealed class GhostDeliveryPlan
     {
         public int RouteId = -1;
@@ -66,6 +84,8 @@ public static class LogisticsObserver
         public ObjectInfo Requester;
         public ResourceDefinition Resource;
         public double Amount;
+        public readonly List<GhostDeliveryCargoItem> CargoItems = new List<GhostDeliveryCargoItem>();
+        public readonly List<Data.GhostFlightModuleRecord> ModuleItems = new List<Data.GhostFlightModuleRecord>();
         public ResourceDefinition SupplyResource;
         public double SupplyConsumed;
         public double PayloadCargoMass;
@@ -77,6 +97,12 @@ public static class LogisticsObserver
         public bool DestinationRefuel;
         public double ReservedReturnFuel;
         public double OriginFuelTopUp;
+        public double TankFuelAtDeparture;
+        public double OutboundTankPayloadMass;
+        public ResourceDefinition TankFuelDeliveryResource;
+        public double TankFuelDeliveryLimit;
+        public double TankFuelDelivered;
+        public double CargoHoldFuelDelivered;
         public ObjectInfoData OriginData;
         public ObjectInfoData DestinationData;
     }
@@ -144,6 +170,20 @@ public static class LogisticsObserver
         public RouteResourceDispatchOrderItem Item;
         public double Remaining;
         public int DispatchCount;
+        public bool AllowPartialLoad;
+    }
+
+    private sealed class RouteManifestCargoItem
+    {
+        public RouteConvoyResourceState State;
+        public ResourceDefinition Resource;
+        public Data.GhostFlightModuleRecord Module;
+        public double Amount;
+        public ResourceDefinition SupplyResource;
+        public double SupplyConsumed;
+        public double PayloadCargoMass;
+        public double PayloadMassPerUnit;
+        public double TankFuelDelivered;
     }
 
     private sealed class RouteLiftCapacityState
@@ -281,6 +321,9 @@ public static class LogisticsObserver
 
     public static void OnDayChange(double days)
     {
+        if (days <= 0)
+            return;
+
         var player = MonoBehaviourSingleton<GameManager>.Instance?.Player;
         if (player == null) return;
         var snapshot = BuildPlannerSnapshot(player);
@@ -310,7 +353,8 @@ public static class LogisticsObserver
             }
 
             route.statusNote = null;
-            if (route.resources == null || route.resources.Count == 0)
+            var hasPendingModules = HasPendingRouteModules(route);
+            if ((route.resources == null || route.resources.Count == 0) && !hasPendingModules)
             {
                 route.statusNote = "No resources on route";
                 continue;
@@ -348,7 +392,8 @@ public static class LogisticsObserver
         var destinationData = destination?.GetObjectInfoData(player);
         var result = new List<RouteResourceDispatchOrderItem>();
 
-        foreach (var rule in route.resources.Where(rule => rule != null && rule.isActive))
+        foreach (var rule in (route.resources ?? new List<Data.LogisticsRouteResourceRule>())
+                     .Where(rule => rule != null && rule.isActive))
         {
             var rd = rule.ResourceDefinition ?? ResolveResource(rule.resourceDef?.id);
             rule.ResourceDefinition = rd;
@@ -480,10 +525,15 @@ public static class LogisticsObserver
         if (capacityLeft <= 0.001)
             return;
 
+        TryApplyRouteModuleSurfaceLift(route, source, destination, support, capacityState, player, ref capacityLeft);
+
         var sourceData = source.GetObjectInfoData(player);
         var destinationData = destination.GetObjectInfoData(player);
-        if (sourceData == null || destinationData == null)
+        if (sourceData == null || destinationData == null || capacityLeft <= 0.001)
+        {
+            MarkRouteReservedLaunchVehiclesUsed(source, player, capacityState.ReservedCapacityUsed.Keys);
             return;
+        }
 
         var demands = new List<RouteVirtualLiftDemand>();
         foreach (var rule in route.resources ?? new List<Data.LogisticsRouteResourceRule>())
@@ -525,9 +575,59 @@ public static class LogisticsObserver
         }
 
         if (demands.Count == 0)
+        {
+            MarkRouteReservedLaunchVehiclesUsed(source, player, capacityState.ReservedCapacityUsed.Keys);
             return;
+        }
 
         ApplyBalancedRouteVirtualSurfaceLiftGroup(demands, capacityLeft, support, capacityState, player);
+        MarkRouteReservedLaunchVehiclesUsed(source, player, capacityState.ReservedCapacityUsed.Keys);
+    }
+
+    private static void TryApplyRouteModuleSurfaceLift(Data.LogisticsRouteRecord route, ObjectInfo source,
+        ObjectInfo destination, List<LaunchSupportOption> support, RouteLiftCapacityState capacityState,
+        Company player, ref double capacityLeft)
+    {
+        if (route?.pendingModules == null || route.pendingModules.Count == 0
+            || source == null || destination == null || player == null
+            || support == null || support.Count == 0 || capacityLeft <= 0.001)
+            return;
+
+        var selectedModules = new List<Data.GhostFlightModuleRecord>();
+        var selectedMass = 0.0;
+        VirtualLiftPlan selectedPlan = null;
+        foreach (var module in GetDispatchableRouteModules(route, player))
+        {
+            var moduleMass = GetRouteModulePayloadMass(module, player);
+            if (moduleMass <= 0.001 || selectedMass + moduleMass > capacityLeft + 0.05)
+                continue;
+
+            var trialMass = selectedMass + moduleMass;
+            if (!TryBuildRouteModuleSurfaceLiftPlan(source, trialMass, player, support, capacityState, out var trialPlan)
+                || trialPlan.PayloadAmount + 0.05 < trialMass)
+                continue;
+
+            selectedModules.Add(module);
+            selectedMass = trialMass;
+            selectedPlan = trialPlan;
+        }
+
+        if (selectedModules.Count == 0 || selectedPlan == null || selectedMass <= 0.001)
+            return;
+
+        if (!ApplyVirtualLiftModuleChanges(source, destination, player, selectedModules, selectedPlan))
+            return;
+
+        if (selectedPlan.SharedFacilityCapacityUsed > 0.001)
+            CommitVirtualLiftUsage(source, player, selectedPlan.SharedFacilityCapacityUsed);
+        capacityState.Commit(selectedPlan);
+        capacityLeft = Math.Max(0.0, capacityLeft - selectedPlan.FacilityCapacityUsed);
+
+        foreach (var module in selectedModules)
+            route.pendingModules.Remove(module);
+
+        route.statusNote = $"Lifted {selectedModules.Count} module{(selectedModules.Count == 1 ? "" : "s")}";
+        Log($"ROUTE-LIFT modules: route={route.routeId} {source.ObjectName}->{destination.ObjectName} modules={FormatRouteModuleLiftManifestForLog(selectedModules, player)} fuel={FormatVirtualLiftFuel(selectedPlan)} capacityUsed={selectedPlan.FacilityCapacityUsed:0.#}");
     }
 
     private static void ApplyBalancedRouteVirtualSurfaceLiftGroup(List<RouteVirtualLiftDemand> demands,
@@ -588,9 +688,6 @@ public static class LogisticsObserver
             if (movedThisRound <= 0.001)
                 break;
         }
-
-        var source = demands.FirstOrDefault(d => d?.Source != null)?.Source;
-        MarkRouteReservedLaunchVehiclesUsed(source, player, capacityState.ReservedCapacityUsed.Keys);
     }
 
     private static double GetRouteInFlightDeliveryAmount(Data.LogisticsRouteRecord route, ResourceDefinition rd)
@@ -616,6 +713,30 @@ public static class LogisticsObserver
         return Math.Max(0, sourceData.CheckResources(rd) - Math.Max(0, sourceKeep) - GetCommittedStock(source, rd));
     }
 
+    private static bool HasPendingRouteModules(Data.LogisticsRouteRecord route)
+    {
+        return route?.pendingModules?.Any(module => module != null) == true;
+    }
+
+    private static List<Data.GhostFlightModuleRecord> GetDispatchableRouteModules(Data.LogisticsRouteRecord route,
+        Company player)
+    {
+        return (route?.pendingModules ?? new List<Data.GhostFlightModuleRecord>())
+            .Where(module => module != null && GetRouteModulePayloadMass(module, player) > 0.001)
+            .ToList();
+    }
+
+    private static double GetRouteModulePayloadMass(Data.GhostFlightModuleRecord module, Company player)
+    {
+        if (module == null)
+            return 0.0;
+        if (module.mass > 0.001)
+            return module.mass;
+
+        var descriptor = Data.LogisticsNetwork.ResolveSpaceModuleDescriptor(module.moduleId);
+        return Math.Max(0.0, descriptor?.GetMass(player) ?? 0.0);
+    }
+
     private static string TryCreateRouteGhostConvoys(Data.LogisticsRouteRecord route, ObjectInfo source,
         ObjectInfo destination, List<RouteResourceDispatchOrderItem> orderedResources, Company player,
         PlannerSnapshot snapshot)
@@ -632,7 +753,8 @@ public static class LogisticsObserver
             })
             .Where(state => state.Remaining > 0.001)
             .ToList();
-        if (states.Count == 0)
+        var pendingModules = GetDispatchableRouteModules(route, player);
+        if (states.Count == 0 && pendingModules.Count == 0)
             return null;
 
         var craftCandidates = FindIdleRouteGhostCraftCandidates(route, source, destination, player, out var craftReason);
@@ -643,71 +765,73 @@ public static class LogisticsObserver
             return craftReason;
         }
 
-        FilterRouteStatesForFullLoads(states, craftCandidates, source, destination, player);
-        if (states.Count == 0)
+        if (states.Count > 0)
+            FilterRouteStatesForFullLoads(states, craftCandidates, source, destination, player);
+        if (states.Count == 0 && pendingModules.Count == 0)
             return "Waiting for full load";
 
         AllocateRouteDispatchCapacity(states, craftCandidates.Count);
 
         var plans = new List<GhostDeliveryPlan>();
         var plannedCargoByResource = new Dictionary<string, double>();
+        var plannedModules = new HashSet<Data.GhostFlightModuleRecord>();
         string bestReason = null;
 
         foreach (var craft in craftCandidates)
         {
             if (states.All(state => state.Remaining <= 0.001
-                    || state.DispatchCount >= state.Item.MaxGhostDispatches))
+                    || state.DispatchCount >= state.Item.MaxGhostDispatches)
+                && pendingModules.All(module => plannedModules.Contains(module)))
                 break;
 
-            GhostDeliveryPlan selectedPlan = null;
-            RouteConvoyResourceState selectedState = null;
-            foreach (var state in states)
+            if (!TryBuildRouteGhostManifestPlan(craft, source, destination, states, player, snapshot,
+                    route.routeId, plannedCargoByResource, pendingModules, plannedModules,
+                    out var selectedPlan, out var selectedItems, out var reason))
             {
-                if (state.Remaining <= 0.001 || state.DispatchCount >= state.Item.MaxGhostDispatches)
-                    continue;
-
-                var rd = state.Item.Resource;
-                var rule = state.Item.Rule;
-                if (rd == null || rule == null)
-                    continue;
-
-                plannedCargoByResource.TryGetValue(rd.ID, out var plannedCargo);
-                var sourceAvailable = Math.Max(0,
-                    GetRouteSourceAvailableAfterKeep(source, rd, rule.sourceKeep, player) - plannedCargo);
-                var desired = Math.Min(state.Remaining, sourceAvailable);
-                if (desired <= 0.001)
-                    continue;
-
-                if (TryBuildGhostDeliveryPlan(craft, source, destination, rd, desired, player, snapshot,
-                        out var plan, out var reason, route.routeId))
-                {
-                    selectedPlan = plan;
-                    selectedState = state;
-                    break;
-                }
-
                 if (!string.IsNullOrWhiteSpace(reason))
-                {
                     bestReason = reason;
-                    rule.statusNote = reason;
-                }
+                continue;
             }
 
-            if (selectedPlan == null || selectedState == null)
-                continue;
-
             plans.Add(selectedPlan);
-            selectedState.Remaining = Math.Max(0, selectedState.Remaining - selectedPlan.Amount);
-            selectedState.DispatchCount++;
-            plannedCargoByResource.TryGetValue(selectedPlan.Resource.ID, out var existingCargo);
-            plannedCargoByResource[selectedPlan.Resource.ID] = existingCargo + selectedPlan.Amount;
+            foreach (var item in selectedItems)
+            {
+                var delivered = Math.Max(0.0, item?.Amount ?? 0.0) + Math.Max(0.0, item?.TankFuelDelivered ?? 0.0);
+                if (item?.State?.Item?.Rule == null || item.Resource == null || delivered <= 0)
+                    continue;
+
+                item.State.Remaining = Math.Max(0, item.State.Remaining - delivered);
+                item.State.DispatchCount++;
+                plannedCargoByResource.TryGetValue(item.Resource.ID, out var existingCargo);
+                plannedCargoByResource[item.Resource.ID] = existingCargo + delivered;
+            }
         }
 
         if (plans.Count == 0)
-            return bestReason ?? "No route convoy dispatched";
+        {
+            var failureReason = bestReason ?? "No route convoy dispatched";
+            foreach (var state in states)
+            {
+                var rule = state?.Item?.Rule;
+                if (rule == null)
+                    continue;
+                if (string.IsNullOrWhiteSpace(rule.statusNote)
+                    || rule.statusNote == "Waiting for convoy launch")
+                    rule.statusNote = failureReason;
+            }
+            LogVerbose($"GHOST route-convoy-blocked: route={route.routeId} {source.ObjectName}->{destination.ObjectName} reason={failureReason}");
+            return failureReason;
+        }
 
         if (!TryCommitGhostDeliveryConvoys(plans, player, out var commitReason))
             return commitReason ?? bestReason ?? "Could not commit route convoy";
+
+        var shippedModules = plans.SelectMany(plan => plan.ModuleItems ?? new List<Data.GhostFlightModuleRecord>()).ToList();
+        if (shippedModules.Count > 0 && route.pendingModules != null)
+        {
+            foreach (var module in shippedModules)
+                route.pendingModules.Remove(module);
+        }
 
         foreach (var state in states)
         {
@@ -724,12 +848,444 @@ public static class LogisticsObserver
         return null;
     }
 
+    private static bool TryBuildRouteGhostManifestPlan(Data.GhostCraftRecord craft, ObjectInfo source,
+        ObjectInfo destination, List<RouteConvoyResourceState> states, Company player, PlannerSnapshot snapshot,
+        int routeId, Dictionary<string, double> plannedCargoByResource,
+        List<Data.GhostFlightModuleRecord> pendingModules, ISet<Data.GhostFlightModuleRecord> plannedModules,
+        out GhostDeliveryPlan plan, out List<RouteManifestCargoItem> manifest, out string reason)
+    {
+        plan = null;
+        manifest = null;
+        reason = null;
+        var scType = ResolveSpacecraftType(craft?.shipTypeId);
+        if (craft == null || scType == null || source == null || destination == null || player == null)
+        {
+            reason = "Ghost craft or route is unavailable";
+            return false;
+        }
+
+        manifest = BuildBalancedRouteCargoManifest(craft, scType, states, source, destination, player,
+            plannedCargoByResource, pendingModules, plannedModules, out reason);
+        EnsureRouteFuelTankManifestMarker(manifest, states, scType);
+        if (manifest.Count == 0)
+            return false;
+
+        var capacity = scType.GetCargoCapacity(player);
+        var hasModuleCargo = manifest.Any(item => item?.Module != null);
+        if (routeId >= 0 && !hasModuleCargo
+            && !IsFullMixedRouteGhostLoad(manifest, capacity)
+            && !IsPriorityAllowedRoutePartialLoad(manifest, capacity)
+            && !IsUsefulHumanRoutePartialLoad(manifest, capacity))
+        {
+            reason = "Waiting for full load";
+            foreach (var item in manifest)
+                if (string.IsNullOrWhiteSpace(item?.State?.Item?.Rule?.statusNote))
+                    item.State.Item.Rule.statusNote = reason;
+            return false;
+        }
+
+        if (!TryBuildMixedGhostDeliveryPlan(craft, source, destination, manifest, player, snapshot, out plan, out reason, routeId))
+            return false;
+
+        AssignTankDeliveryToRouteManifest(manifest, plan);
+        return true;
+    }
+
+    private static List<RouteManifestCargoItem> BuildBalancedRouteCargoManifest(Data.GhostCraftRecord craft,
+        SpacecraftType scType, List<RouteConvoyResourceState> states, ObjectInfo source, ObjectInfo destination,
+        Company player, Dictionary<string, double> plannedCargoByResource,
+        List<Data.GhostFlightModuleRecord> pendingModules, ISet<Data.GhostFlightModuleRecord> plannedModules,
+        out string reason)
+    {
+        reason = null;
+        var manifest = new List<RouteManifestCargoItem>();
+        states ??= new List<RouteConvoyResourceState>();
+        pendingModules ??= new List<Data.GhostFlightModuleRecord>();
+        plannedModules ??= new HashSet<Data.GhostFlightModuleRecord>();
+        if (craft == null || scType == null || source == null || player == null)
+        {
+            reason = "Route manifest is unavailable";
+            return manifest;
+        }
+        if (states.Count == 0 && pendingModules.Count == 0)
+        {
+            reason = "Route manifest has no cargo";
+            return manifest;
+        }
+
+        var capacityLeft = Math.Max(0.0, scType.GetCargoCapacity(player));
+        if (capacityLeft <= 0.001)
+        {
+            reason = "Ghost craft has no cargo capacity";
+            return manifest;
+        }
+
+        foreach (var module in pendingModules)
+        {
+            if (module == null || plannedModules.Contains(module))
+                continue;
+
+            var moduleMass = GetRouteModulePayloadMass(module, player);
+            if (moduleMass <= 0.001)
+                continue;
+            if (moduleMass > capacityLeft + 0.05)
+            {
+                if (manifest.Count == 0)
+                    reason = "Module cargo exceeds route ship capacity";
+                continue;
+            }
+
+            manifest.Add(new RouteManifestCargoItem
+            {
+                Module = module,
+                Amount = 1.0,
+                PayloadCargoMass = moduleMass,
+                PayloadMassPerUnit = moduleMass
+            });
+            plannedModules.Add(module);
+            capacityLeft = Math.Max(0.0, capacityLeft - moduleMass);
+        }
+
+        if (states.Count == 0)
+        {
+            if (manifest.Count == 0 && string.IsNullOrWhiteSpace(reason))
+                reason = "No route cargo could fit";
+            return manifest;
+        }
+
+        var plannedThisManifest = new Dictionary<string, double>(StringComparer.Ordinal);
+        var plannedSupplyThisManifest = new Dictionary<string, double>(StringComparer.Ordinal);
+        var guard = 0;
+        while (capacityLeft > 0.001 && guard++ < 32)
+        {
+            var active = states
+                .Where(state => CanConsiderRouteManifestState(state, source, player, plannedCargoByResource, plannedThisManifest))
+                .ToList();
+            if (active.Count == 0)
+                break;
+
+            var cargoActive = active
+                .Where(state => !IsSpacecraftFuelResource(scType, state.Item.Resource))
+                .ToList();
+            if (cargoActive.Count == 0)
+                cargoActive = active;
+
+            var priority = cargoActive.Max(state => state.Item.Priority);
+            var priorityGroup = cargoActive
+                .Where(state => state.Item.Priority == priority)
+                .OrderBy(state => state.Item.FillRatio)
+                .ThenByDescending(state => state.Remaining)
+                .ThenBy(state => state.Item.ResourceName, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            if (priorityGroup.Count == 0)
+                break;
+
+            var shareMass = capacityLeft / priorityGroup.Count;
+            var movedThisRound = 0.0;
+            foreach (var state in priorityGroup)
+            {
+                if (capacityLeft <= 0.001)
+                    break;
+
+                var desiredMass = Math.Min(shareMass, capacityLeft);
+                if (!TryBuildRouteManifestCargoItem(state, source, destination, player, desiredMass,
+                        plannedCargoByResource, plannedThisManifest, plannedSupplyThisManifest, out var item))
+                    continue;
+
+                AddRouteManifestCargoItem(manifest, item);
+                plannedThisManifest.TryGetValue(item.Resource.ID, out var plannedAmount);
+                plannedThisManifest[item.Resource.ID] = plannedAmount + item.Amount;
+                if (item.SupplyResource != null && item.SupplyConsumed > 0)
+                {
+                    plannedSupplyThisManifest.TryGetValue(item.SupplyResource.ID, out var plannedSupply);
+                    plannedSupplyThisManifest[item.SupplyResource.ID] = plannedSupply + item.SupplyConsumed;
+                }
+
+                capacityLeft = Math.Max(0.0, capacityLeft - item.PayloadCargoMass);
+                movedThisRound += item.PayloadCargoMass;
+            }
+
+            if (movedThisRound <= 0.001)
+                break;
+        }
+
+        if (manifest.Count == 0)
+            reason = "No route cargo could fit";
+        return manifest;
+    }
+
+    private static void EnsureRouteFuelTankManifestMarker(List<RouteManifestCargoItem> manifest,
+        List<RouteConvoyResourceState> states, SpacecraftType scType)
+    {
+        if (manifest == null || states == null || scType == null)
+            return;
+
+        var fuelType = scType.GetFuelType();
+        if (fuelType == null || manifest.Any(item => IsSameResource(item?.Resource, fuelType)))
+            return;
+
+        var state = states
+            .Where(candidate => candidate?.Item?.Resource != null
+                && candidate.Remaining > 0.001
+                && candidate.DispatchCount < candidate.Item.MaxGhostDispatches
+                && IsSameResource(candidate.Item.Resource, fuelType))
+            .OrderByDescending(candidate => candidate.Item.Priority)
+            .ThenBy(candidate => candidate.Item.FillRatio)
+            .FirstOrDefault();
+        if (state == null)
+            return;
+
+        manifest.Add(new RouteManifestCargoItem
+        {
+            State = state,
+            Resource = state.Item.Resource,
+            Amount = 0.0,
+            PayloadCargoMass = 0.0,
+            PayloadMassPerUnit = 1.0
+        });
+    }
+
+    private static void AssignTankDeliveryToRouteManifest(List<RouteManifestCargoItem> manifest, GhostDeliveryPlan plan)
+    {
+        if (manifest == null || plan?.TankFuelDeliveryResource == null || plan.TankFuelDelivered <= 0.001)
+            return;
+
+        var item = manifest.FirstOrDefault(candidate => IsSameResource(candidate?.Resource, plan.TankFuelDeliveryResource));
+        if (item != null)
+            item.TankFuelDelivered = plan.TankFuelDelivered;
+    }
+
+    private static bool CanConsiderRouteManifestState(RouteConvoyResourceState state, ObjectInfo source, Company player,
+        Dictionary<string, double> plannedCargoByResource, Dictionary<string, double> plannedThisManifest)
+    {
+        if (state?.Item?.Rule == null || state.Item.Resource == null)
+            return false;
+        if (state.Remaining <= 0.001 || state.DispatchCount >= state.Item.MaxGhostDispatches)
+            return false;
+
+        var rd = state.Item.Resource;
+        plannedCargoByResource ??= new Dictionary<string, double>(StringComparer.Ordinal);
+        plannedThisManifest ??= new Dictionary<string, double>(StringComparer.Ordinal);
+        plannedCargoByResource.TryGetValue(rd.ID, out var alreadyPlanned);
+        plannedThisManifest.TryGetValue(rd.ID, out var manifestPlanned);
+        var sourceAvailable = GetRouteSourceAvailableAfterKeep(source, rd, state.Item.Rule.sourceKeep, player)
+                              - alreadyPlanned - manifestPlanned;
+        return sourceAvailable > 0.001;
+    }
+
+    private static bool TryBuildRouteManifestCargoItem(RouteConvoyResourceState state, ObjectInfo source,
+        ObjectInfo destination, Company player, double maxPayloadMass,
+        Dictionary<string, double> plannedCargoByResource, Dictionary<string, double> plannedThisManifest,
+        Dictionary<string, double> plannedSupplyThisManifest, out RouteManifestCargoItem item)
+    {
+        item = null;
+        var rd = state?.Item?.Resource;
+        var rule = state?.Item?.Rule;
+        if (rd == null || rule == null || source == null || player == null || maxPayloadMass <= 0.001)
+            return false;
+
+        var travelDays = EstimateGhostTravelDays(source, destination);
+        var isHumanPayload = IsHumanResource(rd);
+        var supplyResource = isHumanPayload ? ResolveSupplyResource() : null;
+        if (isHumanPayload && supplyResource == null)
+            return false;
+
+        var supplyPerUnit = isHumanPayload ? EstimateCrewSupplyNeed(1, travelDays, player) : 0.0;
+        var payloadMassPerUnit = GetPayloadMassPerResourceUnit(rd, supplyPerUnit);
+        if (payloadMassPerUnit <= 0.001)
+            return false;
+
+        plannedCargoByResource ??= new Dictionary<string, double>(StringComparer.Ordinal);
+        plannedThisManifest ??= new Dictionary<string, double>(StringComparer.Ordinal);
+        plannedSupplyThisManifest ??= new Dictionary<string, double>(StringComparer.Ordinal);
+        plannedCargoByResource.TryGetValue(rd.ID, out var alreadyPlanned);
+        plannedThisManifest.TryGetValue(rd.ID, out var manifestPlanned);
+        var sourceAvailable = Math.Max(0.0,
+            GetRouteSourceAvailableAfterKeep(source, rd, rule.sourceKeep, player) - alreadyPlanned - manifestPlanned);
+        var stateRemaining = Math.Max(0.0, state.Remaining - manifestPlanned);
+        var amount = Math.Min(stateRemaining, sourceAvailable);
+        amount = Math.Min(amount, maxPayloadMass / payloadMassPerUnit);
+
+        double supplyConsumed = 0.0;
+        if (isHumanPayload)
+        {
+            var sourceData = source.GetObjectInfoData(player);
+            var supplyAvailable = Math.Max(0.0, sourceData?.CheckResources(supplyResource) ?? 0.0);
+            plannedSupplyThisManifest.TryGetValue(supplyResource.ID, out var plannedSupply);
+            supplyAvailable = Math.Max(0.0, supplyAvailable - GetCommittedStock(source, supplyResource) - plannedSupply);
+            if (supplyPerUnit > 0.001)
+                amount = Math.Min(amount, supplyAvailable / supplyPerUnit);
+            amount = Math.Floor(amount);
+            supplyConsumed = amount * supplyPerUnit;
+        }
+
+        if (amount <= 0.001)
+            return false;
+
+        var payloadCargoMass = GetPayloadCargoMass(rd, amount, supplyConsumed);
+        if (payloadCargoMass <= 0.001 || payloadCargoMass > maxPayloadMass + 0.05)
+            return false;
+
+        item = new RouteManifestCargoItem
+        {
+            State = state,
+            Resource = rd,
+            Amount = amount,
+            SupplyResource = supplyResource,
+            SupplyConsumed = supplyConsumed,
+            PayloadCargoMass = payloadCargoMass,
+            PayloadMassPerUnit = payloadMassPerUnit
+        };
+        return true;
+    }
+
+    private static void AddRouteManifestCargoItem(List<RouteManifestCargoItem> manifest, RouteManifestCargoItem item)
+    {
+        if (manifest == null || item?.Resource == null || item.Amount <= 0)
+            return;
+
+        var existing = manifest.FirstOrDefault(candidate => candidate != null && ReferenceEquals(candidate.State, item.State));
+        if (existing == null)
+        {
+            manifest.Add(item);
+            return;
+        }
+
+        existing.Amount += item.Amount;
+        existing.SupplyConsumed += item.SupplyConsumed;
+        existing.PayloadCargoMass += item.PayloadCargoMass;
+    }
+
+    private static bool IsFullMixedRouteGhostLoad(List<RouteManifestCargoItem> manifest, double capacity)
+    {
+        if (manifest == null || manifest.Count == 0 || capacity <= 0.001)
+            return false;
+
+        var payloadMass = manifest.Sum(item => Math.Max(0.0, item?.PayloadCargoMass ?? 0.0));
+        if (payloadMass + 0.05 >= capacity)
+            return true;
+        if (manifest.Any(item => item?.PayloadCargoMass <= 0.001 && item.State?.Item?.Resource != null
+                && IsSameResource(item.Resource, item.State.Item.Resource)))
+            return true;
+
+        return manifest.All(item => item?.State?.AllowPartialLoad == true);
+    }
+
+    private static bool IsUsefulHumanRoutePartialLoad(List<RouteManifestCargoItem> manifest, double capacity)
+    {
+        if (manifest == null || manifest.Count == 0 || capacity <= 0.001)
+            return false;
+        if (!manifest.Any(item => IsHumanResource(item?.Resource)))
+            return false;
+
+        var payloadMass = manifest.Sum(item => Math.Max(0.0, item?.PayloadCargoMass ?? 0.0));
+        return payloadMass + 0.05 >= capacity * HumanRoutePartialLoadMinimumFillRatio;
+    }
+
+    private static bool IsPriorityAllowedRoutePartialLoad(List<RouteManifestCargoItem> manifest, double capacity)
+    {
+        if (manifest == null || manifest.Count == 0 || capacity <= 0.001)
+            return false;
+
+        var payloadMass = manifest.Sum(item => Math.Max(0.0, item?.PayloadCargoMass ?? 0.0));
+        if (payloadMass <= 0.001)
+            return false;
+
+        var highestPriority = manifest
+            .Where(item => item?.State?.Item?.Resource != null
+                && item.Amount > 0.001
+                && item.PayloadCargoMass > 0.001)
+            .Select(item => NormalizeRoutePriority(item.State.Item.Priority))
+            .DefaultIfEmpty(0)
+            .Max();
+
+        if (highestPriority >= 2)
+            return true;
+        if (highestPriority >= 1)
+            return payloadMass + 0.05 >= capacity * HighRoutePartialLoadMinimumFillRatio;
+        return false;
+    }
+
+    private static bool CanBuildPriorityPartialRouteLoad(List<RouteConvoyResourceState> states,
+        List<Data.GhostCraftRecord> craftCandidates, ObjectInfo source, ObjectInfo destination, Company player,
+        out double minimumCargoCapacity, out double totalPotentialPayloadMass)
+    {
+        minimumCargoCapacity = 0.0;
+        totalPotentialPayloadMass = 0.0;
+        if (states == null || states.Count == 0 || craftCandidates == null || craftCandidates.Count == 0)
+            return false;
+
+        if (!TryGetMinimumRouteCargoCapacity(craftCandidates, player, out minimumCargoCapacity))
+            return false;
+
+        totalPotentialPayloadMass = EstimateRouteStatesPotentialPayloadMass(states, source, destination, player);
+        if (totalPotentialPayloadMass <= 0.001)
+            return false;
+
+        var capacity = minimumCargoCapacity;
+        var totalPayload = totalPotentialPayloadMass;
+        return states.Any(state => CanOpenPriorityPartialRouteLoad(state, source, destination, player,
+            capacity, totalPayload));
+    }
+
+    private static bool CanOpenPriorityPartialRouteLoad(RouteConvoyResourceState state, ObjectInfo source,
+        ObjectInfo destination, Company player, double minimumCargoCapacity, double totalPotentialPayloadMass)
+    {
+        if (state?.Item?.Rule == null || state.Item.Resource == null || minimumCargoCapacity <= 0.001)
+            return false;
+
+        var priority = NormalizeRoutePriority(state.Item.Priority);
+        if (priority < 1)
+            return false;
+
+        var ownPotentialPayloadMass = EstimateRouteStatePotentialPayloadMass(state, source, destination, player);
+        if (ownPotentialPayloadMass <= 0.001)
+            return false;
+
+        if (priority >= 2)
+            return true;
+        return totalPotentialPayloadMass + 0.05 >= minimumCargoCapacity * HighRoutePartialLoadMinimumFillRatio;
+    }
+
+    private static double EstimateRouteStatesPotentialPayloadMass(List<RouteConvoyResourceState> states,
+        ObjectInfo source, ObjectInfo destination, Company player)
+    {
+        if (states == null || states.Count == 0)
+            return 0.0;
+
+        return states.Sum(state => EstimateRouteStatePotentialPayloadMass(state, source, destination, player));
+    }
+
+    private static double EstimateRouteStatePotentialPayloadMass(RouteConvoyResourceState state,
+        ObjectInfo source, ObjectInfo destination, Company player)
+    {
+        var rd = state?.Item?.Resource;
+        var rule = state?.Item?.Rule;
+        if (rd == null || rule == null || source == null || player == null || state.Remaining <= 0.001)
+            return 0.0;
+
+        var travelDays = EstimateGhostTravelDays(source, destination);
+        var supplyPerUnit = IsHumanResource(rd) ? EstimateCrewSupplyNeed(1, travelDays, player) : 0.0;
+        var payloadMassPerUnit = GetPayloadMassPerResourceUnit(rd, supplyPerUnit);
+        if (payloadMassPerUnit <= 0.001)
+            return 0.0;
+
+        var sourceAvailable = GetRouteSourceAvailableAfterKeep(source, rd, rule.sourceKeep, player);
+        var amount = Math.Min(state.Remaining, sourceAvailable);
+        if (IsHumanResource(rd))
+            amount = Math.Floor(amount);
+        return Math.Max(0.0, amount) * payloadMassPerUnit;
+    }
+
     private static void FilterRouteStatesForFullLoads(List<RouteConvoyResourceState> states,
         List<Data.GhostCraftRecord> craftCandidates, ObjectInfo source, ObjectInfo destination, Company player)
     {
         if (states == null || states.Count == 0)
             return;
 
+        var allowMixedPartialLoads = CanBuildMixedFullRouteLoad(states, craftCandidates, source, destination, player);
+        var allowPriorityPartialLoads = CanBuildPriorityPartialRouteLoad(states, craftCandidates, source, destination,
+            player, out var minimumCargoCapacity, out var totalPotentialPayloadMass);
         for (var i = states.Count - 1; i >= 0; i--)
         {
             var state = states[i];
@@ -746,10 +1302,81 @@ public static class LogisticsObserver
             var desired = Math.Min(state.Remaining, state.Item.Available);
             if (desired + 0.001 >= minimumFullLoad)
                 continue;
+            if (allowMixedPartialLoads)
+            {
+                state.AllowPartialLoad = true;
+                continue;
+            }
+            if (allowPriorityPartialLoads
+                && CanOpenPriorityPartialRouteLoad(state, source, destination, player,
+                    minimumCargoCapacity, totalPotentialPayloadMass))
+            {
+                state.AllowPartialLoad = true;
+                continue;
+            }
+            if (IsFinalPartialRouteLoad(state, minimumFullLoad))
+            {
+                state.AllowPartialLoad = true;
+                continue;
+            }
+            if (allowPriorityPartialLoads)
+                continue;
 
             state.Item.Rule.statusNote = "Waiting for full load";
             states.RemoveAt(i);
         }
+    }
+
+    private static bool IsFinalPartialRouteLoad(RouteConvoyResourceState state, double minimumFullLoad)
+    {
+        if (state?.Item == null || minimumFullLoad <= 0.001)
+            return false;
+
+        return state.Item.Outstanding > 0.001
+            && state.Item.Outstanding + 0.001 < minimumFullLoad
+            && state.Item.Available + 0.001 >= state.Item.Outstanding;
+    }
+
+    private static bool CanBuildMixedFullRouteLoad(List<RouteConvoyResourceState> states,
+        List<Data.GhostCraftRecord> craftCandidates, ObjectInfo source, ObjectInfo destination, Company player)
+    {
+        if (states == null || states.Count <= 1 || craftCandidates == null || craftCandidates.Count == 0)
+            return false;
+
+        var minimumCapacity = double.MaxValue;
+        foreach (var craft in craftCandidates)
+        {
+            var scType = ResolveSpacecraftType(craft?.shipTypeId);
+            var capacity = Math.Max(0.0, scType?.GetCargoCapacity(player) ?? 0.0);
+            if (capacity > 0.001)
+                minimumCapacity = Math.Min(minimumCapacity, capacity);
+        }
+
+        if (minimumCapacity == double.MaxValue)
+            return false;
+
+        var totalPayloadMass = 0.0;
+        foreach (var state in states)
+        {
+            var rd = state?.Item?.Resource;
+            var rule = state?.Item?.Rule;
+            if (rd == null || rule == null || state.Remaining <= 0.001)
+                continue;
+
+            var travelDays = EstimateGhostTravelDays(source, destination);
+            var supplyPerUnit = IsHumanResource(rd) ? EstimateCrewSupplyNeed(1, travelDays, player) : 0.0;
+            var payloadMassPerUnit = GetPayloadMassPerResourceUnit(rd, supplyPerUnit);
+            if (payloadMassPerUnit <= 0.001)
+                continue;
+
+            var sourceAvailable = GetRouteSourceAvailableAfterKeep(source, rd, rule.sourceKeep, player);
+            var amount = Math.Min(state.Remaining, sourceAvailable);
+            if (IsHumanResource(rd))
+                amount = Math.Floor(amount);
+            totalPayloadMass += Math.Max(0.0, amount) * payloadMassPerUnit;
+        }
+
+        return totalPayloadMass + 0.05 >= minimumCapacity;
     }
 
     private static bool TryGetMinimumRouteFullLoadAmount(ResourceDefinition rd, List<Data.GhostCraftRecord> craftCandidates,
@@ -786,6 +1413,27 @@ public static class LogisticsObserver
         }
 
         return minimumFullLoad < double.MaxValue;
+    }
+
+    private static bool TryGetMinimumRouteCargoCapacity(List<Data.GhostCraftRecord> craftCandidates,
+        Company player, out double minimumCargoCapacity)
+    {
+        minimumCargoCapacity = double.MaxValue;
+        if (craftCandidates == null || craftCandidates.Count == 0)
+            return false;
+
+        foreach (var craft in craftCandidates)
+        {
+            var scType = ResolveSpacecraftType(craft?.shipTypeId);
+            if (scType == null)
+                continue;
+
+            var capacity = scType.GetCargoCapacity(player);
+            if (capacity > 0.001)
+                minimumCargoCapacity = Math.Min(minimumCargoCapacity, capacity);
+        }
+
+        return minimumCargoCapacity < double.MaxValue;
     }
 
     private static void AllocateRouteDispatchCapacity(List<RouteConvoyResourceState> states, int idleCraftCount)
@@ -859,7 +1507,8 @@ public static class LogisticsObserver
         }
 
         var first = plans[0];
-        if (first.Craft == null || first.Provider == null || first.Requester == null || first.Resource == null)
+        if (first.Craft == null || first.Provider == null || first.Requester == null
+            || (first.Resource == null && first.ModuleItems.Count == 0))
         {
             reason = "Convoy plan is incomplete";
             return false;
@@ -876,9 +1525,14 @@ public static class LogisticsObserver
         {
             plan.Craft.tankFuel = Math.Min(plan.Craft.tankFuelCapacity, plan.Craft.tankFuel + plan.OriginFuelTopUp);
             plan.Craft.tankFuel = Math.Max(0, plan.Craft.tankFuel - plan.Outbound.Fuel);
-            CommitStock(plan.Provider, plan.Resource, plan.Amount);
-            if (plan.SupplyResource != null && plan.SupplyConsumed > 0)
-                CommitStock(plan.Provider, plan.SupplyResource, plan.SupplyConsumed);
+            foreach (var cargo in GetGhostDeliveryCargoItems(plan))
+            {
+                CommitStock(plan.Provider, cargo.Resource, cargo.Amount);
+                if (cargo.SupplyResource != null && cargo.SupplyConsumed > 0)
+                    CommitStock(plan.Provider, cargo.SupplyResource, cargo.SupplyConsumed);
+            }
+            if (plan.TankFuelDeliveryResource != null && plan.TankFuelDelivered > 0.001)
+                CommitStock(plan.Provider, plan.TankFuelDeliveryResource, plan.TankFuelDelivered);
             if (plan.LaunchPlan != null)
             {
                 CommitVirtualLiftUsage(plan.Provider, player, plan.LaunchPlan.FacilityCapacityUsed);
@@ -892,6 +1546,32 @@ public static class LogisticsObserver
         var outboundTravelDays = Math.Max(1, (outboundArrival - outboundDeparture).TotalDays);
         var ownerOI = ResolveObject(first.Craft.homeObjectId) ?? first.Provider;
         var ownerData = Data.LogisticsNetwork.GetOrCreate(ownerOI);
+        var craftCount = plans
+            .Select(plan => plan.Craft?.ledgerId ?? 0)
+            .Where(id => id > 0)
+            .Distinct()
+            .Count();
+        if (craftCount <= 0)
+            craftCount = plans.Count;
+        var scType = first.SpacecraftType ?? ResolveSpacecraftType(first.Craft?.shipTypeId);
+        var dryMass = Math.Max(0.0, scType?.GetMass(player) ?? 0.0);
+        var cargoPayloadMass = plans.Sum(plan => Math.Max(0.0, plan.PayloadCargoMass));
+        var outboundTankPayloadMass = plans.Sum(plan => Math.Max(0.0, plan.OutboundTankPayloadMass));
+        var outboundDeltaV = plans.Select(plan => Math.Max(0.0, plan.Outbound?.DeltaV ?? 0.0)).DefaultIfEmpty(0.0).Max();
+        var returnDeltaV = plans.Select(plan => Math.Max(0.0, plan.ReturnLeg?.DeltaV ?? 0.0)).DefaultIfEmpty(0.0).Max();
+        var tankFuelBeforeLaunch = plans.Sum(plan => Math.Max(0.0, plan.Craft?.tankFuel ?? 0.0));
+        var originFuelTopUp = plans.Sum(plan => Math.Max(0.0, plan.OriginFuelTopUp));
+        var tankCapacity = plans.Sum(plan => Math.Max(0.0, plan.Craft?.tankFuelCapacity ?? 0.0));
+        var tankFuelAtDeparture = plans.Sum(plan =>
+            Math.Min(Math.Max(0.0, plan.Craft?.tankFuelCapacity ?? 0.0),
+                Math.Max(0.0, plan.Craft?.tankFuel ?? 0.0) + Math.Max(0.0, plan.OriginFuelTopUp)));
+        var outboundFuel = plans.Sum(plan => Math.Max(0, plan.Outbound?.Fuel ?? 0));
+        var tankFuelAfterOutbound = Math.Max(0.0, tankFuelAtDeparture - outboundFuel);
+        var tankFuelDelivered = plans.Sum(plan => Math.Max(0.0, plan.TankFuelDelivered));
+        var cargoHoldFuelDelivered = plans.Sum(plan => Math.Max(0.0, plan.CargoHoldFuelDelivered));
+        var carriedReturnFuel = plans.Sum(plan => GetCarriedReturnFuel(plan.DestinationRefuel, plan.ReturnLeg));
+        var tankFuelAtArrivalAfterUnload = Math.Max(0.0, tankFuelAfterOutbound - tankFuelDelivered);
+        var powVariable = GetMissionFuelPowVariable();
         var flight = new Data.GhostFlightRecord
         {
             flightId = Guid.NewGuid().ToString("N"),
@@ -905,7 +1585,10 @@ public static class LogisticsObserver
             fromObjectId = first.Provider.id,
             toObjectId = first.Requester.id,
             cargoManifest = BuildGhostFlightCargoManifest(plans),
-            outboundFuel = plans.Sum(plan => Math.Max(0, plan.Outbound?.Fuel ?? 0)),
+            moduleManifest = BuildGhostFlightModuleManifest(plans),
+            launchFuelManifest = BuildGhostFlightLaunchFuelManifest(plans),
+            launchSupportLabels = BuildGhostFlightLaunchSupportLabels(plans),
+            outboundFuel = outboundFuel,
             returnFuel = plans.Sum(plan => Math.Max(0, plan.ReturnLeg?.Fuel ?? 0)),
             launchFuel = plans.Sum(plan => plan.LaunchPlan?.FuelByResource.Values.Sum() ?? 0),
             reservedReturnFuel = plans.Sum(plan => Math.Max(0, plan.ReservedReturnFuel)),
@@ -914,6 +1597,38 @@ public static class LogisticsObserver
             launchPayloadMass = plans.Sum(plan => Math.Max(0, plan.LaunchPayload)),
             outboundTravelDays = outboundTravelDays,
             returnTravelDays = Math.Max(1, plans.Max(plan => plan.ReturnLeg?.TravelDays ?? 1)),
+            outboundDeltaV = outboundDeltaV,
+            returnDeltaV = returnDeltaV,
+            outboundAvailableDeltaV = plans.Select(plan => Math.Max(0.0, plan.Outbound?.AvailableDeltaV ?? 0.0)).DefaultIfEmpty(0.0).Max(),
+            returnAvailableDeltaV = plans.Select(plan => Math.Max(0.0, plan.ReturnLeg?.AvailableDeltaV ?? 0.0)).DefaultIfEmpty(0.0).Max(),
+            outboundRouteKind = plans.Select(plan => plan.Outbound?.RouteKind).FirstOrDefault(kind => !string.IsNullOrWhiteSpace(kind)),
+            returnRouteKind = plans.Select(plan => plan.ReturnLeg?.RouteKind).FirstOrDefault(kind => !string.IsNullOrWhiteSpace(kind)),
+            outboundFlightPlanMode = plans.Select(plan => plan.Outbound?.FlightPlanMode ?? Data.LogisticsFlightPlanMode.Optimal).FirstOrDefault(),
+            returnFlightPlanMode = plans.Select(plan => plan.ReturnLeg?.FlightPlanMode ?? Data.LogisticsFlightPlanMode.Optimal).FirstOrDefault(),
+            dispatchCraftCount = craftCount,
+            dryMassPerCraft = dryMass,
+            cargoPayloadMass = cargoPayloadMass,
+            outboundMassToFuel = dryMass > 0.001
+                ? LogisticsVanillaMissionMath.CalculateMassToFuel(dryMass, cargoPayloadMass + outboundTankPayloadMass, craftCount)
+                : 0.0,
+            returnMassToFuel = dryMass > 0.001
+                ? LogisticsVanillaMissionMath.CalculateMassToFuel(dryMass, 0.0, craftCount)
+                : 0.0,
+            exhaustVelocity = Math.Max(0.0, scType?.GetExhaustV(player) ?? 0.0),
+            fuelPowVariable = powVariable,
+            tankCapacity = tankCapacity,
+            tankFuelBeforeLaunch = tankFuelBeforeLaunch,
+            originFuelTopUp = originFuelTopUp,
+            tankFuelAtDeparture = tankFuelAtDeparture,
+            tankFuelAfterOutbound = tankFuelAfterOutbound,
+            tankFuelDeliveryResourceId = plans
+                .Select(plan => plan.TankFuelDeliveryResource?.ID)
+                .FirstOrDefault(id => !string.IsNullOrWhiteSpace(id)),
+            tankFuelDelivered = tankFuelDelivered,
+            cargoHoldFuelDelivered = cargoHoldFuelDelivered,
+            tankFuelReservedForOutbound = outboundFuel,
+            tankFuelReservedForReturn = carriedReturnFuel,
+            tankFuelAtArrivalAfterUnload = tankFuelAtArrivalAfterUnload,
             departureDate = outboundDeparture,
             arrivalDate = outboundArrival,
             status = outboundDeparture > now ? Data.GhostFlightStatus.Planned : Data.GhostFlightStatus.Outbound,
@@ -931,8 +1646,11 @@ public static class LogisticsObserver
             plan.Craft.routeToObjectId = plan.Requester.id;
             plan.Craft.departureDate = flight.departureDate;
             plan.Craft.arrivalDate = flight.arrivalDate;
-            plan.Craft.cargoResourceId = plan.Resource.ID;
-            plan.Craft.cargoAmount = plan.Amount;
+            var cargoItems = GetGhostDeliveryManifestItems(plan).ToList();
+            plan.Craft.cargoResourceId = cargoItems.Count == 1
+                ? cargoItems[0].Resource.ID
+                : cargoItems.FirstOrDefault()?.Resource?.ID;
+            plan.Craft.cargoAmount = cargoItems.Sum(item => Math.Max(0.0, item.Amount));
             plan.Craft.blockedReason = null;
         }
 
@@ -984,7 +1702,7 @@ public static class LogisticsObserver
         var powVariable = GetMissionFuelPowVariable();
         var outboundMass = LogisticsVanillaMissionMath.CalculateMassToFuel(
             dryMass,
-            plans.Sum(plan => Math.Max(0.0, plan.PayloadCargoMass)),
+            plans.Sum(plan => Math.Max(0.0, plan.PayloadCargoMass) + Math.Max(0.0, plan.OutboundTankPayloadMass)),
             craftCount);
         var returnMass = LogisticsVanillaMissionMath.CalculateMassToFuel(dryMass, 0.0, craftCount);
         var groupedOutboundFuel = LogisticsVanillaMissionMath.CalculateTotalPropellantNeeded(
@@ -1015,9 +1733,29 @@ public static class LogisticsObserver
             plan.DestinationRefuel = destinationRefuel;
             plan.ReservedReturnFuel = destinationRefuel ? Math.Max(0.0, plan.ReturnLeg?.Fuel ?? 0.0) : 0.0;
 
-            var requiredTankAtDeparture = destinationRefuel
-                ? Math.Max(0.0, plan.Outbound?.Fuel ?? 0.0)
-                : Math.Max(0.0, plan.Outbound?.Fuel ?? 0.0) + Math.Max(0.0, plan.ReturnLeg?.Fuel ?? 0.0);
+            var carriedReturnFuel = GetCarriedReturnFuel(destinationRefuel, plan.ReturnLeg);
+            if (plan.TankFuelDeliveryResource != null)
+            {
+                var tankCapacity = Math.Max(0.0, plan.Craft?.tankFuelCapacity ?? 0.0);
+                var tankFuelAfterOutbound = Math.Max(0.0, tankCapacity - Math.Max(0.0, plan.Outbound?.Fuel ?? 0.0));
+                var deliverableFromTank = Math.Max(0.0, tankFuelAfterOutbound - carriedReturnFuel);
+                var desiredTankDelivery = Math.Max(0.0, plan.TankFuelDeliveryLimit - Math.Max(0.0, plan.CargoHoldFuelDelivered));
+                plan.TankFuelDelivered = Math.Min(desiredTankDelivery, deliverableFromTank);
+                plan.OutboundTankPayloadMass = tankFuelAfterOutbound;
+                plan.TankFuelAtDeparture = tankCapacity;
+                plan.Amount = GetGhostDeliveryCargoItems(plan).Sum(item => Math.Max(0.0, item.Amount))
+                              + Math.Max(0.0, plan.TankFuelDelivered);
+            }
+            else
+            {
+                plan.TankFuelDelivered = 0.0;
+                plan.OutboundTankPayloadMass = carriedReturnFuel;
+                plan.TankFuelAtDeparture = Math.Max(0.0, plan.Outbound?.Fuel ?? 0.0) + carriedReturnFuel;
+            }
+
+            var requiredTankAtDeparture = plan.TankFuelDeliveryResource != null
+                ? Math.Max(0.0, plan.TankFuelAtDeparture)
+                : Math.Max(0.0, plan.Outbound?.Fuel ?? 0.0) + carriedReturnFuel;
             if (requiredTankAtDeparture > plan.Craft.tankFuelCapacity + 0.001)
             {
                 reason = $"Ghost craft tank too small for {plan.Provider.ObjectName}->{plan.Requester.ObjectName}->{plan.Provider.ObjectName}";
@@ -1025,6 +1763,8 @@ public static class LogisticsObserver
             }
 
             plan.OriginFuelTopUp = Math.Max(0.0, requiredTankAtDeparture - plan.Craft.tankFuel);
+            if (!RefreshGhostLaunchPlanForLoadedPayload(plan, player, null, out reason))
+                return false;
         }
 
         if (plans.Count > 1)
@@ -1064,15 +1804,194 @@ public static class LogisticsObserver
         return Math.Max(0.001, economic?.PowVariable ?? 2.0);
     }
 
+    private static bool IsSameResource(ResourceDefinition left, ResourceDefinition right)
+    {
+        if (left == null || right == null)
+            return false;
+        return ReferenceEquals(left, right)
+            || (!string.IsNullOrWhiteSpace(left.ID)
+                && string.Equals(left.ID, right.ID, StringComparison.Ordinal));
+    }
+
+    private static bool IsSpacecraftFuelResource(SpacecraftType scType, ResourceDefinition rd)
+    {
+        return scType != null && IsSameResource(scType.GetFuelType(), rd);
+    }
+
+    private static double GetCarriedReturnFuel(bool destinationRefuel, GhostLegPlan returnLeg)
+    {
+        return destinationRefuel ? 0.0 : Math.Max(0.0, returnLeg?.Fuel ?? 0.0);
+    }
+
+    private static double GetRouteManifestFuelDemand(List<RouteManifestCargoItem> cargoItems, ResourceDefinition fuelType)
+    {
+        if (cargoItems == null || fuelType == null)
+            return 0.0;
+
+        return cargoItems
+            .Where(item => item?.Resource != null && IsSameResource(item.Resource, fuelType))
+            .GroupBy(item => item.State)
+            .Sum(group =>
+            {
+                var item = group.FirstOrDefault();
+                return Math.Max(0.0, item?.State?.Remaining ?? group.Sum(candidate => Math.Max(0.0, candidate.Amount)));
+            });
+    }
+
+    private static bool TryCalculateTankerOutboundLeg(Data.GhostCraftRecord craft, SpacecraftType scType,
+        ObjectInfo provider, ObjectInfo requester, ResourceDefinition fuelType, double originalPayloadCargoMass,
+        double nonFuelCargoMass, double cargoCapacity, double deliveryLimit, double carriedReturnFuel,
+        Company player, int routeId, out GhostLegPlan outbound, out double tankFuelDelivered,
+        out double cargoHoldFuelDelivered, out double outboundTankPayloadMass, out string reason)
+    {
+        outbound = null;
+        tankFuelDelivered = 0.0;
+        cargoHoldFuelDelivered = 0.0;
+        outboundTankPayloadMass = 0.0;
+        reason = null;
+
+        if (craft == null || scType == null || fuelType == null || deliveryLimit <= 0.001)
+        {
+            reason = "No fuel delivery demand";
+            return false;
+        }
+
+        var tankCapacity = Math.Max(0.0, craft.tankFuelCapacity);
+        if (tankCapacity <= carriedReturnFuel + 0.001)
+        {
+            reason = $"Ghost craft tank too small for fuel delivery after return reserve";
+            return false;
+        }
+
+        nonFuelCargoMass = Math.Max(0.0, nonFuelCargoMass);
+        var cargoSpare = Math.Max(0.0, Math.Max(0.0, cargoCapacity) - nonFuelCargoMass);
+        var maxOutboundFuel = Math.Max(0.0, tankCapacity - Math.Max(0.0, carriedReturnFuel));
+        var tankPayloadEstimate = tankCapacity;
+        var cargoFuel = Math.Min(cargoSpare, Math.Max(0.0, deliveryLimit - Math.Max(0.0, tankCapacity - carriedReturnFuel)));
+        GhostLegPlan lastOutbound = null;
+
+        for (var i = 0; i < 8; i++)
+        {
+            var effectivePayloadMass = nonFuelCargoMass + cargoFuel + Math.Max(0.0, tankPayloadEstimate);
+            if (!TryCalculateGhostLeg(craft, scType, provider, requester, fuelType, effectivePayloadMass,
+                    player, routeId, out lastOutbound, null, maxOutboundFuel))
+            {
+                reason = lastOutbound?.Reason ?? "Could not calculate outbound fuel";
+                return false;
+            }
+
+            var nextTankPayload = Math.Max(0.0, tankCapacity - Math.Max(0.0, lastOutbound.Fuel));
+            var deliverableFromTank = Math.Max(0.0, nextTankPayload - Math.Max(0.0, carriedReturnFuel));
+            var nextTankDelivered = Math.Min(Math.Max(0.0, deliveryLimit), deliverableFromTank);
+            var nextCargoFuel = Math.Min(cargoSpare, Math.Max(0.0, deliveryLimit - nextTankDelivered));
+
+            var stable = Math.Abs(nextTankPayload - tankPayloadEstimate) <= 0.05
+                && Math.Abs(nextCargoFuel - cargoFuel) <= 0.05
+                && Math.Abs(nextTankDelivered - tankFuelDelivered) <= 0.05;
+            tankPayloadEstimate = nextTankPayload;
+            tankFuelDelivered = nextTankDelivered;
+            cargoFuel = nextCargoFuel;
+            if (stable)
+                break;
+        }
+
+        outbound = lastOutbound;
+        cargoHoldFuelDelivered = Math.Max(0.0, cargoFuel);
+        outboundTankPayloadMass = Math.Max(0.0, tankPayloadEstimate);
+        tankFuelDelivered = Math.Max(0.0, tankFuelDelivered);
+
+        if (outbound == null)
+        {
+            reason = "Could not calculate outbound fuel";
+            return false;
+        }
+        if (tankFuelDelivered + cargoHoldFuelDelivered <= 0.001)
+        {
+            reason = "No fuel could be delivered after flight reserves";
+            return false;
+        }
+
+        return true;
+    }
+
+    private static void ApplyCargoHoldFuelDelivery(List<RouteManifestCargoItem> cargoItems,
+        ResourceDefinition fuelType, double cargoHoldFuelDelivered)
+    {
+        if (cargoItems == null || fuelType == null)
+            return;
+
+        var remaining = Math.Max(0.0, cargoHoldFuelDelivered);
+        foreach (var item in cargoItems.Where(item => item?.Resource != null && IsSameResource(item.Resource, fuelType)))
+        {
+            var limit = Math.Max(0.0, item.State?.Remaining ?? Math.Max(item.Amount, remaining));
+            var amount = Math.Min(remaining, limit);
+            item.Amount = amount;
+            item.SupplyConsumed = 0.0;
+            item.PayloadMassPerUnit = Math.Max(0.001, item.PayloadMassPerUnit <= 0.001 ? 1.0 : item.PayloadMassPerUnit);
+            item.PayloadCargoMass = amount * item.PayloadMassPerUnit;
+            remaining = Math.Max(0.0, remaining - amount);
+        }
+    }
+
+    private static double CalculateLoadedLaunchPayload(GhostDeliveryPlan plan, Company player)
+    {
+        if (plan == null)
+            return 0.0;
+
+        var scType = plan.SpacecraftType ?? ResolveSpacecraftType(plan.Craft?.shipTypeId);
+        var dryMass = scType != null && player != null ? Math.Max(0.0, scType.GetMass(player)) : 0.0;
+        var cargoMass = Math.Max(0.0, plan.PayloadCargoMass);
+        var tankFuelAtDeparture = plan.TankFuelAtDeparture > 0.001
+            ? plan.TankFuelAtDeparture
+            : Math.Max(0.0, plan.Outbound?.Fuel ?? 0.0) + GetCarriedReturnFuel(plan.DestinationRefuel, plan.ReturnLeg);
+        return dryMass + cargoMass + tankFuelAtDeparture;
+    }
+
+    private static bool RefreshGhostLaunchPlanForLoadedPayload(GhostDeliveryPlan plan, Company player,
+        PlannerSnapshot snapshot, out string reason)
+    {
+        reason = null;
+        if (plan == null || player == null)
+        {
+            reason = "Ghost delivery plan is unavailable";
+            return false;
+        }
+
+        plan.LaunchPayload = CalculateLoadedLaunchPayload(plan, player);
+        plan.LaunchPlan = null;
+
+        var provider = plan.Provider;
+        if (provider == null || !provider.NeedVehicleToLaunch())
+            return true;
+
+        var cargoItems = GetGhostDeliveryCargoItems(plan).ToList();
+        var payloadResource = cargoItems.FirstOrDefault(item => IsHumanResource(item.Resource))?.Resource
+                              ?? cargoItems.FirstOrDefault()?.Resource
+                              ?? plan.Resource;
+
+        if (!TryBuildGhostLaunchPlan(provider, plan.LaunchPayload, player,
+                GetGhostLaunchSupport(provider, player, snapshot, plan.RouteId), payloadResource, out var launchPlan))
+        {
+            reason = $"No reserved launch vehicle or facility launch capacity left at {provider.ObjectName}";
+            return false;
+        }
+
+        plan.LaunchPlan = launchPlan;
+        return true;
+    }
+
     private static List<ResourceRemoval> BuildGhostDeliveryPlanRemovals(GhostDeliveryPlan plan)
     {
         var removals = new List<ResourceRemoval>();
         if (plan == null)
             return removals;
 
-        removals.Add(new ResourceRemoval { Data = plan.OriginData, Resource = plan.Resource, Amount = plan.Amount });
-        if (plan.SupplyResource != null && plan.SupplyConsumed > 0)
-            removals.Add(new ResourceRemoval { Data = plan.OriginData, Resource = plan.SupplyResource, Amount = plan.SupplyConsumed });
+        foreach (var cargo in GetGhostDeliveryCargoItems(plan))
+        {
+            removals.Add(new ResourceRemoval { Data = plan.OriginData, Resource = cargo.Resource, Amount = cargo.Amount });
+            if (cargo.SupplyResource != null && cargo.SupplyConsumed > 0)
+                removals.Add(new ResourceRemoval { Data = plan.OriginData, Resource = cargo.SupplyResource, Amount = cargo.SupplyConsumed });
+        }
         if (plan.FuelType != null && plan.OriginFuelTopUp > 0)
             removals.Add(new ResourceRemoval { Data = plan.OriginData, Resource = plan.FuelType, Amount = plan.OriginFuelTopUp });
         if (plan.DestinationRefuel && plan.ReservedReturnFuel > 0)
@@ -1094,11 +2013,99 @@ public static class LogisticsObserver
         var manifest = new List<Data.GhostFlightCargoRecord>();
         foreach (var plan in plans ?? Enumerable.Empty<GhostDeliveryPlan>())
         {
-            if (plan?.Resource == null || plan.Amount <= 0)
-                continue;
-            AddGhostFlightCargo(manifest, plan.Resource.ID, plan.Amount, plan.SupplyConsumed);
+            foreach (var cargo in GetGhostDeliveryCargoItems(plan))
+                AddGhostFlightCargo(manifest, cargo.Resource.ID, cargo.Amount, cargo.SupplyConsumed);
+            if (plan?.TankFuelDeliveryResource != null && plan.TankFuelDelivered > 0.001)
+                AddGhostFlightCargo(manifest, plan.TankFuelDeliveryResource.ID, plan.TankFuelDelivered, 0.0);
         }
         return manifest;
+    }
+
+    private static List<Data.GhostFlightModuleRecord> BuildGhostFlightModuleManifest(IEnumerable<GhostDeliveryPlan> plans)
+    {
+        var manifest = new List<Data.GhostFlightModuleRecord>();
+        foreach (var module in (plans ?? Enumerable.Empty<GhostDeliveryPlan>())
+                     .SelectMany(plan => plan?.ModuleItems ?? new List<Data.GhostFlightModuleRecord>()))
+        {
+            if (module == null || string.IsNullOrWhiteSpace(module.moduleId))
+                continue;
+
+            manifest.Add(new Data.GhostFlightModuleRecord
+            {
+                moduleId = module.moduleId,
+                displayName = module.displayName,
+                mass = Math.Max(0.0, module.mass),
+                crew = module.crew,
+                crewValue = module.crewValue
+            });
+        }
+        return manifest;
+    }
+
+    private static List<Data.GhostFlightCargoRecord> BuildGhostFlightLaunchFuelManifest(IEnumerable<GhostDeliveryPlan> plans)
+    {
+        var manifest = new List<Data.GhostFlightCargoRecord>();
+        foreach (var plan in plans ?? Enumerable.Empty<GhostDeliveryPlan>())
+        {
+            foreach (var kv in plan?.LaunchPlan?.FuelByResource ?? new Dictionary<ResourceDefinition, double>())
+            {
+                if (kv.Key == null || kv.Value <= 0.001)
+                    continue;
+                AddGhostFlightCargo(manifest, kv.Key.ID, kv.Value, 0.0);
+            }
+        }
+        return manifest;
+    }
+
+    private static List<string> BuildGhostFlightLaunchSupportLabels(IEnumerable<GhostDeliveryPlan> plans)
+    {
+        return (plans ?? Enumerable.Empty<GhostDeliveryPlan>())
+            .SelectMany(plan => plan?.LaunchPlan?.SupportLabels ?? new List<string>())
+            .Where(label => !string.IsNullOrWhiteSpace(label))
+            .Distinct()
+            .OrderBy(label => label, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private static IEnumerable<GhostDeliveryCargoItem> GetGhostDeliveryCargoItems(GhostDeliveryPlan plan)
+    {
+        if (plan == null)
+            return Enumerable.Empty<GhostDeliveryCargoItem>();
+
+        if (plan.CargoItems.Count > 0)
+            return plan.CargoItems
+                .Where(item => item?.Resource != null && item.Amount > 0.001);
+
+        if (plan.Resource == null || plan.Amount <= 0.001)
+            return Enumerable.Empty<GhostDeliveryCargoItem>();
+
+        return new[]
+        {
+            new GhostDeliveryCargoItem
+            {
+                Resource = plan.Resource,
+                Amount = plan.Amount,
+                SupplyResource = plan.SupplyResource,
+                SupplyConsumed = plan.SupplyConsumed,
+                PayloadCargoMass = plan.PayloadCargoMass
+            }
+        };
+    }
+
+    private static IEnumerable<GhostDeliveryCargoItem> GetGhostDeliveryManifestItems(GhostDeliveryPlan plan)
+    {
+        foreach (var item in GetGhostDeliveryCargoItems(plan))
+            yield return item;
+
+        if (plan?.TankFuelDeliveryResource != null && plan.TankFuelDelivered > 0.001)
+        {
+            yield return new GhostDeliveryCargoItem
+            {
+                Resource = plan.TankFuelDeliveryResource,
+                Amount = plan.TankFuelDelivered,
+                PayloadCargoMass = 0.0
+            };
+        }
     }
 
     private static void AddGhostFlightCargo(List<Data.GhostFlightCargoRecord> manifest, string resourceId,
@@ -1145,9 +2152,29 @@ public static class LogisticsObserver
     private static string FormatGhostPlanManifestForLog(IEnumerable<GhostDeliveryPlan> plans)
     {
         var parts = (plans ?? Enumerable.Empty<GhostDeliveryPlan>())
-            .Where(plan => plan?.Resource != null && plan.Amount > 0)
-            .GroupBy(plan => plan.Resource.ID)
-            .Select(group => $"{group.Key}:{group.Sum(plan => plan.Amount):0.#}")
+            .SelectMany(GetGhostDeliveryManifestItems)
+            .GroupBy(item => item.Resource.ID)
+            .Select(group => $"{group.Key}:{group.Sum(item => item.Amount):0.#}")
+            .ToList();
+        parts.AddRange((plans ?? Enumerable.Empty<GhostDeliveryPlan>())
+            .SelectMany(plan => plan?.ModuleItems ?? new List<Data.GhostFlightModuleRecord>())
+            .Where(module => module != null && !string.IsNullOrWhiteSpace(module.moduleId))
+            .GroupBy(module => module.moduleId)
+            .Select(group => $"{group.Key}:module x{group.Count()}"));
+        return parts.Count == 0 ? "empty" : string.Join(", ", parts);
+    }
+
+    private static string FormatRouteModuleLiftManifestForLog(IEnumerable<Data.GhostFlightModuleRecord> modules,
+        Company player)
+    {
+        var parts = (modules ?? Enumerable.Empty<Data.GhostFlightModuleRecord>())
+            .Where(module => module != null && !string.IsNullOrWhiteSpace(module.moduleId))
+            .GroupBy(module => module.moduleId)
+            .Select(group =>
+            {
+                var mass = group.Sum(module => GetRouteModulePayloadMass(module, player));
+                return $"{group.Key}:module x{group.Count()} mass={mass:0.#}";
+            })
             .ToList();
         return parts.Count == 0 ? "empty" : string.Join(", ", parts);
     }
@@ -1157,6 +2184,10 @@ public static class LogisticsObserver
         var parts = GetGhostFlightCargoManifest(flight)
             .Select(item => $"{item.resourceId}:{item.cargoAmount:0.#}")
             .ToList();
+        parts.AddRange((flight?.moduleManifest ?? new List<Data.GhostFlightModuleRecord>())
+            .Where(module => module != null && !string.IsNullOrWhiteSpace(module.moduleId))
+            .GroupBy(module => module.moduleId)
+            .Select(group => $"{group.Key}:module x{group.Count()}"));
         return parts.Count == 0 ? "empty" : string.Join(", ", parts);
     }
 
@@ -1251,6 +2282,20 @@ public static class LogisticsObserver
                     return;
                 }
             }
+
+            NotifyVanillaDeliveryObjectives(flight, destination, player, manifest);
+        }
+
+        var moduleManifest = GetGhostFlightModuleManifest(flight).ToList();
+        if (moduleManifest.Count > 0
+            && !TryDeliverGhostFlightModules(flight, destination, player, craftList, moduleManifest))
+            return;
+
+        var tankFuelDeliveredPerCraft = craftList.Count <= 0 ? 0.0 : Math.Max(0.0, flight.tankFuelDelivered) / craftList.Count;
+        if (tankFuelDeliveredPerCraft > 0.001)
+        {
+            foreach (var craft in craftList)
+                craft.tankFuel = Math.Max(0.0, craft.tankFuel - tankFuelDeliveredPerCraft);
         }
 
         foreach (var craft in craftList)
@@ -1263,6 +2308,220 @@ public static class LogisticsObserver
         Log($"GHOST arrived: ships={craftList.Count} at={destination.ObjectName} manifest={FormatGhostFlightManifestForLog(flight)}");
 
         StartGhostReturnFlight(ownerData, craftList, flight, destination, home, player);
+    }
+
+    private static IEnumerable<Data.GhostFlightModuleRecord> GetGhostFlightModuleManifest(Data.GhostFlightRecord flight)
+    {
+        return flight?.moduleManifest?
+            .Where(module => module != null && !string.IsNullOrWhiteSpace(module.moduleId))
+            ?? Enumerable.Empty<Data.GhostFlightModuleRecord>();
+    }
+
+    private static bool TryDeliverGhostFlightModules(Data.GhostFlightRecord flight, ObjectInfo destination,
+        Company player, List<Data.GhostCraftRecord> craftList, List<Data.GhostFlightModuleRecord> moduleManifest)
+    {
+        var destData = destination?.GetObjectInfoData(player);
+        if (flight == null || destination == null || player == null || destData == null)
+        {
+            BlockGhostFlightArrival(flight, craftList, $"Could not deliver module cargo to {destination?.ObjectName ?? "destination"}");
+            return false;
+        }
+
+        var cargoAll = CargoAll.CreateCargoEmpty();
+        if (cargoAll == null)
+        {
+            BlockGhostFlightArrival(flight, craftList, "Could not create module cargo manifest");
+            return false;
+        }
+
+        cargoAll.listCargo ??= new List<Cargo>();
+        foreach (var module in moduleManifest ?? new List<Data.GhostFlightModuleRecord>())
+        {
+            var descriptor = Data.LogisticsNetwork.ResolveSpaceModuleDescriptor(module?.moduleId);
+            if (descriptor == null)
+            {
+                BlockGhostFlightArrival(flight, craftList, $"Could not resolve module cargo {module?.moduleId ?? "unknown"}");
+                return false;
+            }
+
+            var cargo = new Cargo(cargoAll)
+            {
+                objectInfo = destination,
+                resourceTypeType = EResourceTypeType.modules,
+                moduleData = descriptor,
+                cargoMass = Math.Max(0.0, module.mass > 0.001 ? module.mass : descriptor.GetMass(player)),
+                cargoMassPotencjal = Math.Max(0.0, module.mass > 0.001 ? module.mass : descriptor.GetMass(player)),
+                crew = module.crew,
+                crewValue = module.crewValue
+            };
+            cargoAll.listCargo.Add(cargo);
+        }
+
+        if (!destData.AddResourcesAndModules(cargoAll, cancelationFly: false, cyclicalMission: false))
+        {
+            BlockGhostFlightArrival(flight, craftList, $"Could not install module cargo at {destination.ObjectName}");
+            return false;
+        }
+
+        return true;
+    }
+
+    private static void BlockGhostFlightArrival(Data.GhostFlightRecord flight, List<Data.GhostCraftRecord> craftList,
+        string reason)
+    {
+        if (flight != null)
+        {
+            flight.status = Data.GhostFlightStatus.Blocked;
+            flight.blockedReason = reason;
+            DestroyGhostFlightVisual(flight.flightId);
+        }
+
+        foreach (var craft in craftList ?? new List<Data.GhostCraftRecord>())
+        {
+            if (craft == null)
+                continue;
+            craft.status = Data.GhostCraftStatus.Blocked;
+            craft.blockedReason = reason;
+        }
+
+        LogWarning($"GHOST deliver-blocked: flight={flight?.flightId ?? "unknown"} ships={craftList?.Count ?? 0} reason={reason}");
+    }
+
+    private static void NotifyVanillaDeliveryObjectives(Data.GhostFlightRecord flight, ObjectInfo destination,
+        Company player, IEnumerable<Data.GhostFlightCargoRecord> manifest)
+    {
+        if (flight == null)
+            return;
+
+        NotifyVanillaDeliveryObjectives(ResolveObject(flight.fromObjectId), destination, player, manifest);
+    }
+
+    private static void NotifyVanillaDeliveryObjectives(ObjectInfo source, ObjectInfo destination,
+        Company player, IEnumerable<Data.GhostFlightCargoRecord> manifest)
+    {
+        if (destination == null || player == null || manifest == null)
+            return;
+
+        var deliveredByResourceId = manifest
+            .Where(cargo => cargo != null && !string.IsNullOrWhiteSpace(cargo.resourceId) && cargo.cargoAmount > 0.001)
+            .GroupBy(cargo => cargo.resourceId)
+            .ToDictionary(group => group.Key, group => group.Sum(cargo => Math.Max(0.0, cargo.cargoAmount)),
+                StringComparer.Ordinal);
+        if (deliveredByResourceId.Count == 0)
+            return;
+
+        var contractManager = MonoBehaviourSingleton<ContractManager>.Instance;
+        if (contractManager?.ActiveContracts == null)
+            return;
+
+        var touched = false;
+        foreach (var contract in contractManager.ActiveContracts.ToList())
+        {
+            if (contract == null
+                || !contract.PerCompanyContractData.TryGetValue(player, out var contractData)
+                || contractData?.ObjectivesDataList == null)
+                continue;
+
+            foreach (var objectiveData in contractData.ObjectivesDataList)
+            {
+                if (!TryApplyGhostDeliveryToVanillaObjective(objectiveData, source, destination, deliveredByResourceId))
+                    continue;
+
+                touched = true;
+            }
+        }
+
+        if (touched)
+            contractManager.MarkNeedRefresh();
+    }
+
+    private static bool TryApplyGhostDeliveryToVanillaObjective(CompanyObjectiveData objectiveData,
+        ObjectInfo source, ObjectInfo destination, IReadOnlyDictionary<string, double> deliveredByResourceId)
+    {
+        if (objectiveData == null || objectiveData.IsCompleteUI || destination == null || deliveredByResourceId == null)
+            return false;
+
+        var objective = objectiveData.Objective;
+        if (objective == null
+            || objective.objectiveType != EObjectiveType.Deliver
+            || objective.deliverEntireAsteroid
+            || !MatchesVanillaDeliveryEndpoint(objectiveData, source, destination))
+            return false;
+
+        var delivered = GetDeliveredAmountForVanillaObjective(objective, deliveredByResourceId);
+        if (delivered <= 0.001)
+            return false;
+
+        objectiveData.howMuchCurrent += delivered;
+        RaiseVanillaObjectiveProgress(objectiveData);
+
+        if (objective.howMuch <= 0f)
+            LogWarning($"CONTRACT deliver-progress: objective={objective.ID} has non-positive target amount");
+        if (objective.howMuch <= objectiveData.howMuchCurrent + 0.001)
+            objectiveData.MarkAsComplete();
+
+        LogVerbose(
+            $"CONTRACT deliver-progress objective={objective.ID} delivered={delivered:0.###} current={objectiveData.howMuchCurrent:0.###}/{objective.howMuch:0.###} to={destination.ObjectName}#{destination.id}");
+        return true;
+    }
+
+    private static bool MatchesVanillaDeliveryEndpoint(CompanyObjectiveData objectiveData, ObjectInfo source,
+        ObjectInfo destination)
+    {
+        var objective = objectiveData?.Objective;
+        if (objective == null || destination == null)
+            return false;
+
+        var fromId = objective.fromID == -999 ? objectiveData.ChangeObjectiveFromID : objective.fromID;
+        if (fromId != 0 && fromId != -1 && (source == null || source.id != fromId))
+            return false;
+
+        if (objective.advance)
+        {
+            CompanyObjectiveData.CheckIsOkAdvance(objectiveData, source, destination, out var ok);
+            return ok;
+        }
+
+        var toId = objective.toID == -999 ? objectiveData.ChangeObjectiveToID : objective.toID;
+        return toId != -999 && destination.id == toId;
+    }
+
+    private static double GetDeliveredAmountForVanillaObjective(Objective objective,
+        IReadOnlyDictionary<string, double> deliveredByResourceId)
+    {
+        if (objective == null || deliveredByResourceId == null)
+            return 0.0;
+
+        if (objective.resourceTypeType == EResourceTypeType.resorces)
+        {
+            if (objective.productItem is ResourceDefinition rd
+                && deliveredByResourceId.TryGetValue(rd.ID, out var delivered))
+                return Math.Max(0.0, delivered);
+            return 0.0;
+        }
+
+        if (objective.resourceTypeType == EResourceTypeType.crew)
+        {
+            var human = SerializedMonoBehaviourSingleton<AllScriptableObjectManager>.Instance
+                ?.AllResourceDefinitions?.GetByID("id_resource_human");
+            if (human != null && deliveredByResourceId.TryGetValue(human.ID, out var deliveredCrew))
+                return Math.Max(0.0, deliveredCrew);
+        }
+
+        return 0.0;
+    }
+
+    private static void RaiseVanillaObjectiveProgress(CompanyObjectiveData objectiveData)
+    {
+        try
+        {
+            if (ObjectiveProgressEventField?.GetValue(objectiveData) is Action<CompanyObjectiveData> progress)
+                progress.Invoke(objectiveData);
+        }
+        catch (Exception exception)
+        {
+            LogWarning($"CONTRACT deliver-progress: failed to invoke objective progress event: {exception.Message}");
+        }
     }
 
     private static void StartGhostReturnFlight(Data.LogisticsObjectData ownerData, List<Data.GhostCraftRecord> craftList,
@@ -1609,9 +2868,181 @@ public static class LogisticsObserver
         return true;
     }
 
+    private static bool TryBuildMixedGhostDeliveryPlan(Data.GhostCraftRecord craft, ObjectInfo provider, ObjectInfo requester,
+        List<RouteManifestCargoItem> cargoItems, Company player, PlannerSnapshot snapshot,
+        out GhostDeliveryPlan plan, out string reason, int routeId = -1)
+    {
+        plan = null;
+        reason = null;
+        var scType = ResolveSpacecraftType(craft?.shipTypeId);
+        var shipFuelType = scType?.GetFuelType();
+        cargoItems = cargoItems?
+            .Where(item => item != null
+                && ((item.Module != null && item.PayloadCargoMass > 0.001)
+                    || (item.Resource != null
+                        && ((item.Amount > 0.001 && item.PayloadCargoMass > 0.001)
+                            || IsSameResource(item.Resource, shipFuelType)))))
+            .ToList();
+        if (craft == null || scType == null || provider == null || requester == null
+            || cargoItems == null || cargoItems.Count == 0 || player == null)
+        {
+            reason = "Ghost craft or route is unavailable";
+            return false;
+        }
+
+        var originData = provider.GetObjectInfoData(player);
+        var destinationData = requester.GetObjectInfoData(player);
+        if (originData == null || destinationData == null)
+        {
+            reason = "Route stockpile is unavailable";
+            return false;
+        }
+
+        var capacity = scType.GetCargoCapacity(player);
+        var resourceCargoItems = cargoItems.Where(item => item.Resource != null).ToList();
+        var moduleCargoItems = cargoItems.Where(item => item.Module != null).ToList();
+        var representativeResource = resourceCargoItems.FirstOrDefault()?.Resource;
+        var payloadCargoMass = cargoItems.Sum(item => Math.Max(0.0, item.PayloadCargoMass));
+        if (payloadCargoMass <= 0.001 && !resourceCargoItems.Any(item => IsSameResource(item.Resource, shipFuelType)))
+        {
+            reason = "Ghost craft has no cargo capacity";
+            return false;
+        }
+        if (payloadCargoMass > capacity + 0.05)
+        {
+            reason = "Ghost craft cargo capacity exceeded";
+            return false;
+        }
+
+        if (!TryCalculateGhostLeg(craft, scType, requester, provider, null, 0, player, routeId,
+                out var returnLeg, Data.LogisticsFlightPlanMode.Optimal))
+        {
+            reason = returnLeg?.Reason ?? "Could not calculate return fuel";
+            return false;
+        }
+
+        var fuelType = returnLeg.FuelType ?? scType.GetFuelType();
+        var destinationRefuel = false;
+        double reservedReturnFuel = 0;
+        var destinationFuelAvailable = fuelType == null ? 0 : destinationData.CheckResources(fuelType);
+        if (fuelType == null || scType.SolarSC || returnLeg.Fuel <= 0)
+        {
+            destinationRefuel = false;
+        }
+        else if (destinationFuelAvailable + 0.001 >= returnLeg.Fuel)
+        {
+            destinationRefuel = true;
+            reservedReturnFuel = returnLeg.Fuel;
+        }
+
+        var carriedReturnFuel = GetCarriedReturnFuel(destinationRefuel, returnLeg);
+        var fuelRouteDemand = GetRouteManifestFuelDemand(resourceCargoItems, fuelType);
+        var tankerPlan = fuelRouteDemand > 0.001 && IsSameResource(fuelType, shipFuelType) && !scType.SolarSC;
+        GhostLegPlan outbound;
+        double tankFuelDelivered;
+        double tankFuelDeliveryLimit;
+        double cargoHoldFuelDelivered;
+        double outboundTankPayloadMass;
+        double tankFuelAtDeparture;
+        if (tankerPlan)
+        {
+            var replacementReserve = destinationRefuel ? reservedReturnFuel : 0.0;
+            tankFuelDeliveryLimit = Math.Max(0.0, fuelRouteDemand + replacementReserve);
+            if (!TryCalculateTankerOutboundLeg(craft, scType, provider, requester, fuelType, payloadCargoMass,
+                    cargoItems.Where(item => !IsSameResource(item.Resource, fuelType)).Sum(item => Math.Max(0.0, item.PayloadCargoMass)),
+                    capacity, tankFuelDeliveryLimit, carriedReturnFuel, player, routeId, out outbound,
+                    out tankFuelDelivered, out cargoHoldFuelDelivered, out outboundTankPayloadMass, out reason))
+            {
+                return false;
+            }
+
+            ApplyCargoHoldFuelDelivery(cargoItems, fuelType, cargoHoldFuelDelivered);
+            payloadCargoMass = cargoItems.Sum(item => Math.Max(0.0, item.PayloadCargoMass));
+            tankFuelAtDeparture = Math.Max(0.0, craft.tankFuelCapacity);
+        }
+        else
+        {
+            tankFuelDelivered = 0.0;
+            tankFuelDeliveryLimit = 0.0;
+            cargoHoldFuelDelivered = 0.0;
+            outboundTankPayloadMass = carriedReturnFuel;
+            var maxOutboundFuel = fuelType == null || scType.SolarSC
+                ? craft.tankFuelCapacity
+                : Math.Max(0.0, craft.tankFuelCapacity - carriedReturnFuel);
+            if (!TryCalculateGhostLeg(craft, scType, provider, requester, representativeResource,
+                    payloadCargoMass + outboundTankPayloadMass, player, routeId, out outbound, null, maxOutboundFuel))
+            {
+                reason = outbound?.Reason ?? "Could not calculate outbound fuel";
+                return false;
+            }
+
+            tankFuelAtDeparture = Math.Max(0.0, outbound.Fuel + carriedReturnFuel);
+        }
+
+        fuelType = outbound.FuelType ?? fuelType;
+        var requiredTankAtDeparture = tankerPlan
+            ? tankFuelAtDeparture
+            : outbound.Fuel + carriedReturnFuel;
+        if (requiredTankAtDeparture > craft.tankFuelCapacity + 0.001)
+        {
+            reason = $"Ghost craft tank too small for {provider.ObjectName}->{requester.ObjectName}->{provider.ObjectName}";
+            return false;
+        }
+
+        var originFuelTopUp = Math.Max(0, requiredTankAtDeparture - craft.tankFuel);
+        plan = new GhostDeliveryPlan
+        {
+            RouteId = routeId,
+            Craft = craft,
+            SpacecraftType = scType,
+            Provider = provider,
+            Requester = requester,
+            Resource = representativeResource,
+            Amount = resourceCargoItems.Sum(item => Math.Max(0.0, item.Amount)) + Math.Max(0.0, tankFuelDelivered),
+            SupplyResource = resourceCargoItems.FirstOrDefault(item => item.SupplyResource != null)?.SupplyResource,
+            SupplyConsumed = resourceCargoItems.Sum(item => Math.Max(0.0, item.SupplyConsumed)),
+            PayloadCargoMass = payloadCargoMass,
+            Outbound = outbound,
+            ReturnLeg = returnLeg,
+            FuelType = fuelType,
+            DestinationRefuel = destinationRefuel,
+            ReservedReturnFuel = reservedReturnFuel,
+            OriginFuelTopUp = originFuelTopUp,
+            TankFuelAtDeparture = tankFuelAtDeparture,
+            OutboundTankPayloadMass = outboundTankPayloadMass,
+            TankFuelDeliveryResource = tankerPlan ? fuelType : null,
+            TankFuelDeliveryLimit = tankFuelDeliveryLimit,
+            TankFuelDelivered = tankFuelDelivered,
+            CargoHoldFuelDelivered = cargoHoldFuelDelivered,
+            OriginData = originData,
+            DestinationData = destinationData
+        };
+
+        foreach (var item in resourceCargoItems)
+        {
+            plan.CargoItems.Add(new GhostDeliveryCargoItem
+            {
+                Resource = item.Resource,
+                Amount = item.Amount,
+                SupplyResource = item.SupplyResource,
+                SupplyConsumed = item.SupplyConsumed,
+                PayloadCargoMass = item.PayloadCargoMass
+            });
+        }
+        plan.ModuleItems.AddRange(moduleCargoItems.Select(item => item.Module).Where(module => module != null));
+
+        if (!RefreshGhostLaunchPlanForLoadedPayload(plan, player, snapshot, out reason))
+            return false;
+
+        if (!CanApplyResourceRemovals(BuildGhostDeliveryPlanRemovals(plan), out reason))
+            return false;
+
+        return true;
+    }
+
     private static bool TryBuildGhostDeliveryPlan(Data.GhostCraftRecord craft, ObjectInfo provider, ObjectInfo requester,
         ResourceDefinition rd, double desiredAmount, Company player, PlannerSnapshot snapshot,
-        out GhostDeliveryPlan plan, out string reason, int routeId = -1)
+        out GhostDeliveryPlan plan, out string reason, int routeId = -1, bool allowPartialRouteLoad = false)
     {
         plan = null;
         reason = null;
@@ -1642,16 +3073,21 @@ public static class LogisticsObserver
 
         var supplyPerHuman = isHumanPayload ? EstimateCrewSupplyNeed(1, outboundTravelDays, player) : 0;
         var payloadMassPerUnit = GetPayloadMassPerResourceUnit(rd, supplyPerHuman);
-        var amount = Math.Min(Math.Max(0, desiredAmount), capacity / Math.Max(0.001, payloadMassPerUnit));
+        var sameFuelRoute = IsSameResource(rd, scType.GetFuelType()) && !scType.SolarSC;
+        var requestedAmount = Math.Max(0, desiredAmount);
+        var amount = Math.Min(requestedAmount, capacity / Math.Max(0.001, payloadMassPerUnit));
         if (isHumanPayload)
             amount = Math.Floor(amount);
-        if (amount <= 0)
+        if (amount <= 0 && !sameFuelRoute)
         {
             reason = "Ghost craft has no cargo capacity";
             return false;
         }
 
-        if (routeId >= 0 && !IsFullRouteGhostLoad(amount, capacity, payloadMassPerUnit, isHumanPayload, out var fullLoadAmount))
+        if (routeId >= 0
+            && !sameFuelRoute
+            && !allowPartialRouteLoad
+            && !IsFullRouteGhostLoad(amount, capacity, payloadMassPerUnit, isHumanPayload, out var fullLoadAmount))
         {
             reason = "Waiting for full load";
             return false;
@@ -1660,33 +3096,14 @@ public static class LogisticsObserver
         var supplyConsumed = isHumanPayload ? EstimateCrewSupplyNeed(amount, outboundTravelDays, player) : 0;
         var payloadCargoMass = GetPayloadCargoMass(rd, amount, supplyConsumed);
 
-        if (!TryCalculateGhostLeg(craft, scType, provider, requester, rd, payloadCargoMass, player, routeId,
-                out var outbound))
-        {
-            reason = outbound?.Reason ?? "Could not calculate outbound fuel";
-            return false;
-        }
-
         if (!TryCalculateGhostLeg(craft, scType, requester, provider, null, 0, player, routeId,
-                out var returnLeg))
+                out var returnLeg, Data.LogisticsFlightPlanMode.Optimal))
         {
             reason = returnLeg?.Reason ?? "Could not calculate return fuel";
             return false;
         }
 
-        var launchPlan = default(GhostLaunchPlan);
-        var launchPayload = scType.GetMass(player) + payloadCargoMass;
-        if (provider.NeedVehicleToLaunch())
-        {
-            if (!TryBuildGhostLaunchPlan(provider, launchPayload, player,
-                    GetGhostLaunchSupport(provider, player, snapshot, routeId), rd, out launchPlan))
-            {
-                reason = $"No reserved launch vehicle or facility launch capacity left at {provider.ObjectName}";
-                return false;
-            }
-        }
-
-        var fuelType = outbound.FuelType ?? returnLeg.FuelType ?? scType.GetFuelType();
+        var fuelType = returnLeg.FuelType ?? scType.GetFuelType();
         var destinationRefuel = false;
         double reservedReturnFuel = 0;
         var destinationFuelAvailable = fuelType == null ? 0 : destinationData.CheckResources(fuelType);
@@ -1700,9 +3117,53 @@ public static class LogisticsObserver
             reservedReturnFuel = returnLeg.Fuel;
         }
 
-        var requiredTankAtDeparture = destinationRefuel
-            ? outbound.Fuel
-            : outbound.Fuel + returnLeg.Fuel;
+        var carriedReturnFuel = GetCarriedReturnFuel(destinationRefuel, returnLeg);
+        var tankerPlan = IsSameResource(rd, fuelType) && IsSameResource(fuelType, scType.GetFuelType()) && !scType.SolarSC;
+        GhostLegPlan outbound;
+        double tankFuelDelivered;
+        double tankFuelDeliveryLimit;
+        double cargoHoldFuelDelivered;
+        double outboundTankPayloadMass;
+        double tankFuelAtDeparture;
+        if (tankerPlan)
+        {
+            var replacementReserve = destinationRefuel ? reservedReturnFuel : 0.0;
+            tankFuelDeliveryLimit = Math.Max(0.0, requestedAmount + replacementReserve);
+            if (!TryCalculateTankerOutboundLeg(craft, scType, provider, requester, fuelType, payloadCargoMass,
+                    0.0, capacity, tankFuelDeliveryLimit, carriedReturnFuel, player, routeId, out outbound,
+                    out tankFuelDelivered, out cargoHoldFuelDelivered, out outboundTankPayloadMass, out reason))
+            {
+                return false;
+            }
+
+            amount = Math.Min(capacity / Math.Max(0.001, payloadMassPerUnit), cargoHoldFuelDelivered);
+            payloadCargoMass = GetPayloadCargoMass(rd, amount, supplyConsumed);
+            cargoHoldFuelDelivered = amount;
+            tankFuelAtDeparture = Math.Max(0.0, craft.tankFuelCapacity);
+        }
+        else
+        {
+            tankFuelDelivered = 0.0;
+            tankFuelDeliveryLimit = 0.0;
+            cargoHoldFuelDelivered = 0.0;
+            outboundTankPayloadMass = carriedReturnFuel;
+            var maxOutboundFuel = fuelType == null || scType.SolarSC
+                ? craft.tankFuelCapacity
+                : Math.Max(0.0, craft.tankFuelCapacity - carriedReturnFuel);
+            if (!TryCalculateGhostLeg(craft, scType, provider, requester, rd,
+                    payloadCargoMass + outboundTankPayloadMass, player, routeId, out outbound, null, maxOutboundFuel))
+            {
+                reason = outbound?.Reason ?? "Could not calculate outbound fuel";
+                return false;
+            }
+
+            tankFuelAtDeparture = Math.Max(0.0, outbound.Fuel + carriedReturnFuel);
+        }
+
+        fuelType = outbound.FuelType ?? fuelType;
+        var requiredTankAtDeparture = tankerPlan
+            ? tankFuelAtDeparture
+            : outbound.Fuel + carriedReturnFuel;
         if (requiredTankAtDeparture > craft.tankFuelCapacity + 0.001)
         {
             reason = $"Ghost craft tank too small for {provider.ObjectName}->{requester.ObjectName}->{provider.ObjectName}";
@@ -1710,28 +3171,6 @@ public static class LogisticsObserver
         }
 
         var originFuelTopUp = Math.Max(0, requiredTankAtDeparture - craft.tankFuel);
-        var removals = new List<ResourceRemoval>
-        {
-            new ResourceRemoval { Data = originData, Resource = rd, Amount = amount }
-        };
-        if (supplyResource != null && supplyConsumed > 0)
-            removals.Add(new ResourceRemoval { Data = originData, Resource = supplyResource, Amount = supplyConsumed });
-        if (fuelType != null && originFuelTopUp > 0)
-            removals.Add(new ResourceRemoval { Data = originData, Resource = fuelType, Amount = originFuelTopUp });
-        if (destinationRefuel && reservedReturnFuel > 0)
-            removals.Add(new ResourceRemoval { Data = destinationData, Resource = fuelType, Amount = reservedReturnFuel });
-        if (launchPlan != null)
-        {
-            foreach (var kv in launchPlan.FuelByResource)
-            {
-                if (kv.Key != null && kv.Value > 0)
-                    removals.Add(new ResourceRemoval { Data = originData, Resource = kv.Key, Amount = kv.Value });
-            }
-        }
-
-        if (!CanApplyResourceRemovals(removals, out reason))
-            return false;
-
         plan = new GhostDeliveryPlan
         {
             RouteId = routeId,
@@ -1740,21 +3179,39 @@ public static class LogisticsObserver
             Provider = provider,
             Requester = requester,
             Resource = rd,
-            Amount = amount,
+            Amount = amount + Math.Max(0.0, tankFuelDelivered),
             SupplyResource = supplyResource,
             SupplyConsumed = supplyConsumed,
             PayloadCargoMass = payloadCargoMass,
             Outbound = outbound,
             ReturnLeg = returnLeg,
             FuelType = fuelType,
-            LaunchPlan = launchPlan,
-            LaunchPayload = launchPayload,
             DestinationRefuel = destinationRefuel,
             ReservedReturnFuel = reservedReturnFuel,
             OriginFuelTopUp = originFuelTopUp,
+            TankFuelAtDeparture = tankFuelAtDeparture,
+            OutboundTankPayloadMass = outboundTankPayloadMass,
+            TankFuelDeliveryResource = tankerPlan ? fuelType : null,
+            TankFuelDeliveryLimit = tankFuelDeliveryLimit,
+            TankFuelDelivered = tankFuelDelivered,
+            CargoHoldFuelDelivered = cargoHoldFuelDelivered,
             OriginData = originData,
             DestinationData = destinationData
         };
+        plan.CargoItems.Add(new GhostDeliveryCargoItem
+        {
+            Resource = rd,
+            Amount = amount,
+            SupplyResource = supplyResource,
+            SupplyConsumed = supplyConsumed,
+            PayloadCargoMass = payloadCargoMass
+        });
+
+        if (!RefreshGhostLaunchPlanForLoadedPayload(plan, player, snapshot, out reason))
+            return false;
+        if (!CanApplyResourceRemovals(BuildGhostDeliveryPlanRemovals(plan), out reason))
+            return false;
+
         return true;
     }
 
@@ -1771,7 +3228,8 @@ public static class LogisticsObserver
 
     private static bool TryCalculateGhostLeg(Data.GhostCraftRecord craft, SpacecraftType scType, ObjectInfo from,
         ObjectInfo to, ResourceDefinition cargoResource, double cargoAmount, Company player, int routeId,
-        out GhostLegPlan plan)
+        out GhostLegPlan plan, Data.LogisticsFlightPlanMode? forcedFlightPlanMode = null,
+        double maxFlightFuel = double.PositiveInfinity)
     {
         plan = new GhostLegPlan();
         if (craft == null || scType == null || from == null || to == null || player == null)
@@ -1788,10 +3246,10 @@ public static class LogisticsObserver
             Resource = cargoResource,
             Amount = cargoAmount
         };
-        var requestedFlightPlanMode = ResolveGhostCraftRequestedFlightPlanMode(craft, routeId);
-        LogVerbose($"ROUTE-MISSION step=leg-input route={routeId} from={from.ObjectName}#{from.id}({from.objectTypes}) to={to.ObjectName}#{to.id}({to.objectTypes}) craftLedger={craft.ledgerId} ship={scType.ID} requestedMode={requestedFlightPlanMode} cargoResource={cargoResource?.ID ?? "none"} cargoAmount={cargoAmount:0.###} cargoMass={cargo.CargoMass:0.###} tank={craft.tankFuel:0.###}/{craft.tankFuelCapacity:0.###} designDV={scType.AvailableDeltaV:0.###} minMaxRel={scType.MinFlightTimeHohRel:0.###}/{scType.MaxFlightTimeHohRel:0.###}");
+        var requestedFlightPlanMode = forcedFlightPlanMode ?? ResolveGhostCraftRequestedFlightPlanMode(craft, routeId);
+        LogVerbose($"ROUTE-MISSION step=leg-input route={routeId} from={from.ObjectName}#{from.id}({from.objectTypes}) to={to.ObjectName}#{to.id}({to.objectTypes}) craftLedger={craft.ledgerId} ship={scType.ID} requestedMode={requestedFlightPlanMode} cargoResource={cargoResource?.ID ?? "none"} cargoAmount={cargoAmount:0.###} cargoMass={cargo.CargoMass:0.###} tank={craft.tankFuel:0.###}/{craft.tankFuelCapacity:0.###} maxFlightFuel={maxFlightFuel:0.###} designDV={scType.AvailableDeltaV:0.###} minMaxRel={scType.MinFlightTimeHohRel:0.###}/{scType.MaxFlightTimeHohRel:0.###}");
         var flight = LogisticsFlightCalculator.CalculateSoonestOptimalFlight(from, to, vehicle, cargo, player,
-            requestedFlightPlanMode);
+            requestedFlightPlanMode, maxFlightFuel);
         if (flight == null || !flight.Success)
         {
             plan.Reason = flight?.Reason ?? "Could not calculate flight";
@@ -1801,9 +3259,12 @@ public static class LogisticsObserver
         plan.FuelType = flight.FuelType ?? plan.FuelType;
         plan.TravelDays = flight.TravelDays;
         plan.DeltaV = flight.EstimatedDeltaV;
+        plan.AvailableDeltaV = flight.AvailableDeltaV;
         plan.Departure = flight.Departure;
         plan.Arrival = flight.Arrival;
         plan.Fuel = flight.FlightFuel;
+        plan.FlightPlanMode = flight.FlightPlanMode;
+        plan.RouteKind = flight.RouteKind.ToString();
         LogVerbose($"GHOST estimate-leg: {from.ObjectName}->{to.ObjectName} ship={craft.shipName} cargo={cargoResource?.ID ?? "none"}:{cargoAmount:0.#} fuel={plan.Fuel:0.#} days={flight.TravelDays:0.#} dV={flight.EstimatedDeltaV:0.##} route={flight.RouteKind} plan={flight.FlightPlanMode}");
         return true;
     }
@@ -1990,13 +3451,10 @@ public static class LogisticsObserver
         if (providerOI == null || player == null || payloadMass <= 0 || support == null || support.Count == 0)
             return false;
 
-        var remaining = payloadMass;
         var facilitySupport = support.Where(option => option != null && option.ReservedLaunchVehicle == null).ToList();
         var facilityCapacityLeft = GetVirtualLiftCapacityLeft(providerOI, player, facilitySupport);
-        var plannedFuel = new Dictionary<ResourceDefinition, double>();
         foreach (var option in support)
         {
-            if (remaining <= 0) break;
             if (option == null || option.Type == null) continue;
             if (!CanLiftResourceWithSupport(option, payloadResource)) continue;
             if (option.ReservedLaunchVehicle != null && !IsReservedLaunchVehicleReady(option.ReservedLaunchVehicle))
@@ -2004,6 +3462,7 @@ public static class LogisticsObserver
 
             var singlePayload = GetVirtualLiftSinglePayloadCapacity(option, providerOI, player);
             if (singlePayload <= 0) continue;
+            if (payloadMass > singlePayload + 0.05) continue;
 
             var siteCount = GetVirtualLiftSiteCount(option);
             if (siteCount <= 0) continue;
@@ -2012,20 +3471,19 @@ public static class LogisticsObserver
                 ? singlePayload
                 : singlePayload * siteCount * VirtualSurfaceLiftPayloadsPerDay();
             if (option.ReservedLaunchVehicle == null)
-                optionCapacity = Math.Min(optionCapacity, Math.Max(0, facilityCapacityLeft - plan.FacilityCapacityUsed));
-            if (optionCapacity <= 0) continue;
+                optionCapacity = Math.Min(optionCapacity, facilityCapacityLeft);
+            if (payloadMass > optionCapacity + 0.05) continue;
 
-            var chunk = Math.Min(remaining, optionCapacity);
             var fuelType = option.Type?.FuelTypeOnStart;
             if (fuelType != null)
             {
                 var fuelPerPayloadTon = GetVirtualLiftFuelPerPayloadTon(option, singlePayload, providerOI, player);
-                var fuelNeeded = Math.Ceiling(chunk * fuelPerPayloadTon);
-                plannedFuel.TryGetValue(fuelType, out var already);
-                var fuelAvailable = GetVirtualLiftFuelAvailable(providerOI, fuelType, player) - already;
+                var fuelNeeded = Math.Ceiling(payloadMass * fuelPerPayloadTon);
+                var fuelAvailable = GetVirtualLiftFuelAvailable(providerOI, fuelType, player);
                 if (fuelAvailable + 0.001 < fuelNeeded)
                     continue;
-                plannedFuel[fuelType] = already + fuelNeeded;
+                if (fuelNeeded > 0.001)
+                    plan.FuelByResource[fuelType] = fuelNeeded;
             }
 
             if (option.ReservedLaunchVehicle != null)
@@ -2035,18 +3493,14 @@ public static class LogisticsObserver
             }
             else
             {
-                plan.FacilityCapacityUsed += chunk;
+                plan.FacilityCapacityUsed += payloadMass;
             }
-            remaining -= chunk;
             if (!string.IsNullOrWhiteSpace(option.Label) && !plan.SupportLabels.Contains(option.Label))
                 plan.SupportLabels.Add(option.Label);
+            return true;
         }
 
-        if (remaining > 0.001)
-            return false;
-        foreach (var kv in plannedFuel)
-            plan.FuelByResource[kv.Key] = kv.Value;
-        return true;
+        return false;
     }
 
     private static bool TryApplyResourceRemovals(List<ResourceRemoval> removals, out string reason)
@@ -2175,11 +3629,69 @@ public static class LogisticsObserver
         foreach (var cargo in GetGhostFlightCargoManifest(flight))
             AddGhostFlightCargo(existing.cargoManifest, cargo.resourceId, cargo.cargoAmount, cargo.supplyConsumed);
 
+        existing.moduleManifest ??= new List<Data.GhostFlightModuleRecord>();
+        foreach (var module in flight.moduleManifest ?? new List<Data.GhostFlightModuleRecord>())
+        {
+            if (module == null || string.IsNullOrWhiteSpace(module.moduleId))
+                continue;
+            existing.moduleManifest.Add(new Data.GhostFlightModuleRecord
+            {
+                moduleId = module.moduleId,
+                displayName = module.displayName,
+                mass = Math.Max(0.0, module.mass),
+                crew = module.crew,
+                crewValue = module.crewValue
+            });
+        }
+
+        existing.launchFuelManifest ??= new List<Data.GhostFlightCargoRecord>();
+        foreach (var cargo in flight.launchFuelManifest ?? new List<Data.GhostFlightCargoRecord>())
+        {
+            if (cargo == null || string.IsNullOrWhiteSpace(cargo.resourceId) || cargo.cargoAmount <= 0.001)
+                continue;
+            AddGhostFlightCargo(existing.launchFuelManifest, cargo.resourceId, cargo.cargoAmount, 0.0);
+        }
+
+        existing.launchSupportLabels ??= new List<string>();
+        foreach (var label in flight.launchSupportLabels ?? new List<string>())
+            if (!string.IsNullOrWhiteSpace(label) && !existing.launchSupportLabels.Contains(label))
+                existing.launchSupportLabels.Add(label);
+
         existing.outboundFuel += flight.outboundFuel;
         existing.returnFuel += flight.returnFuel;
         existing.launchFuel += flight.launchFuel;
         existing.reservedReturnFuel += flight.reservedReturnFuel;
         existing.launchPayloadMass += flight.launchPayloadMass;
+        existing.dispatchCraftCount = GetGhostFlightCraftIds(existing).Count;
+        existing.cargoPayloadMass += flight.cargoPayloadMass;
+        existing.outboundMassToFuel += flight.outboundMassToFuel;
+        existing.returnMassToFuel += flight.returnMassToFuel;
+        existing.tankCapacity += flight.tankCapacity;
+        existing.tankFuelBeforeLaunch += flight.tankFuelBeforeLaunch;
+        existing.originFuelTopUp += flight.originFuelTopUp;
+        existing.tankFuelAtDeparture += flight.tankFuelAtDeparture;
+        existing.tankFuelAfterOutbound += flight.tankFuelAfterOutbound;
+        existing.tankFuelDelivered += flight.tankFuelDelivered;
+        existing.cargoHoldFuelDelivered += flight.cargoHoldFuelDelivered;
+        existing.tankFuelReservedForOutbound += flight.tankFuelReservedForOutbound;
+        existing.tankFuelReservedForReturn += flight.tankFuelReservedForReturn;
+        existing.tankFuelAtArrivalAfterUnload += flight.tankFuelAtArrivalAfterUnload;
+        if (string.IsNullOrWhiteSpace(existing.tankFuelDeliveryResourceId))
+            existing.tankFuelDeliveryResourceId = flight.tankFuelDeliveryResourceId;
+        existing.outboundDeltaV = Math.Max(existing.outboundDeltaV, flight.outboundDeltaV);
+        existing.returnDeltaV = Math.Max(existing.returnDeltaV, flight.returnDeltaV);
+        existing.outboundAvailableDeltaV = Math.Max(existing.outboundAvailableDeltaV, flight.outboundAvailableDeltaV);
+        existing.returnAvailableDeltaV = Math.Max(existing.returnAvailableDeltaV, flight.returnAvailableDeltaV);
+        if (existing.dryMassPerCraft <= 0.001)
+            existing.dryMassPerCraft = flight.dryMassPerCraft;
+        if (existing.exhaustVelocity <= 0.001)
+            existing.exhaustVelocity = flight.exhaustVelocity;
+        if (existing.fuelPowVariable <= 0.001)
+            existing.fuelPowVariable = flight.fuelPowVariable;
+        if (string.IsNullOrWhiteSpace(existing.outboundRouteKind))
+            existing.outboundRouteKind = flight.outboundRouteKind;
+        if (string.IsNullOrWhiteSpace(existing.returnRouteKind))
+            existing.returnRouteKind = flight.returnRouteKind;
 
         foreach (var craft in GetGhostFlightCraft(flight))
             craft.currentFlightId = existing.flightId;
@@ -2755,7 +4267,8 @@ public static class LogisticsObserver
         }
     }
 
-    private static List<LaunchSupportOption> GetVirtualSurfaceLiftSupport(ObjectInfo providerOI, Company player, PlannerSnapshot snapshot)
+    private static List<LaunchSupportOption> GetVirtualSurfaceLiftSupport(ObjectInfo providerOI, Company player,
+        PlannerSnapshot snapshot, bool preferSpaceElevator = true)
     {
         var result = new List<LaunchSupportOption>();
         if (providerOI == null || player == null)
@@ -2780,7 +4293,7 @@ public static class LogisticsObserver
             result.Add(option);
         }
 
-        return result;
+        return preferSpaceElevator ? PreferSpaceElevatorLaunchSupport(result) : result;
     }
 
     private static List<LaunchSupportOption> GetRouteSurfaceLiftSupport(Data.LogisticsRouteRecord route,
@@ -2798,7 +4311,7 @@ public static class LogisticsObserver
             return result;
 
         var route = routeId > 0 ? Data.LogisticsNetwork.FindRoute(routeId) : null;
-        result.AddRange(GetVirtualSurfaceLiftSupport(providerOI, player, snapshot)
+        result.AddRange(GetVirtualSurfaceLiftSupport(providerOI, player, snapshot, preferSpaceElevator: false)
             .Where(option => IsRouteFacilityLaunchAllowed(route, option)));
 
         var data = Data.LogisticsNetwork.Get(providerOI);
@@ -2826,7 +4339,7 @@ public static class LogisticsObserver
             });
         }
 
-        return result
+        return PreferSpaceElevatorLaunchSupport(result)
             .OrderBy(option => option.TierAdjustment)
             .ThenBy(option => option.Type?.Name ?? "LV", StringComparer.OrdinalIgnoreCase)
             .ToList();
@@ -3128,6 +4641,96 @@ public static class LogisticsObserver
         return plan.PayloadAmount > 0;
     }
 
+    private static bool TryBuildRouteModuleSurfaceLiftPlan(ObjectInfo providerOI, double desiredPayloadMass,
+        Company player, List<LaunchSupportOption> support, RouteLiftCapacityState capacityState,
+        out VirtualLiftPlan plan)
+    {
+        plan = new VirtualLiftPlan();
+        if (providerOI == null || player == null || desiredPayloadMass <= 0.001
+            || support == null || support.Count == 0)
+            return false;
+        capacityState ??= new RouteLiftCapacityState();
+
+        var remainingPayloadMass = desiredPayloadMass;
+        var fuelPlanned = new Dictionary<ResourceDefinition, double>();
+        var sharedSkipCapacity = GetVirtualLiftUsedToday(providerOI, player);
+
+        foreach (var option in support)
+        {
+            if (!CanLiftResourceWithSupport(option, null))
+                continue;
+
+            var optionCapacity = GetRouteSurfaceLiftOptionCapacity(option, providerOI, player);
+            if (optionCapacity <= 0)
+                continue;
+
+            var remainingOptionCapacity = optionCapacity;
+            var reservedRecord = option.ReservedLaunchVehicle;
+            if (reservedRecord != null)
+            {
+                remainingOptionCapacity = Math.Max(0, optionCapacity - capacityState.GetReservedUsed(reservedRecord));
+            }
+            else
+            {
+                if (sharedSkipCapacity >= optionCapacity)
+                {
+                    sharedSkipCapacity -= optionCapacity;
+                    continue;
+                }
+                remainingOptionCapacity = optionCapacity - sharedSkipCapacity;
+                sharedSkipCapacity = 0;
+            }
+
+            var fuelType = option.Type.FuelTypeOnStart;
+            var singlePayload = GetVirtualLiftSinglePayloadCapacity(option, providerOI, player);
+            var fuelPerPayloadTon = GetVirtualLiftFuelPerPayloadTon(option, singlePayload, providerOI, player);
+
+            while (remainingPayloadMass > 0.001 && remainingOptionCapacity > 0.001)
+            {
+                var chunkMass = Math.Min(remainingPayloadMass, remainingOptionCapacity);
+                if (fuelType != null && fuelPerPayloadTon > 0)
+                {
+                    fuelPlanned.TryGetValue(fuelType, out var alreadyPlannedFuel);
+                    var fuelAvailable = GetVirtualLiftFuelAvailable(providerOI, fuelType, player) - alreadyPlannedFuel;
+                    chunkMass = Math.Min(chunkMass, fuelAvailable / fuelPerPayloadTon);
+                }
+
+                if (chunkMass <= 0.001)
+                    break;
+
+                var fuelAmount = fuelPerPayloadTon > 0 ? chunkMass * fuelPerPayloadTon : 0;
+                plan.PayloadAmount += chunkMass;
+                plan.FacilityCapacityUsed += chunkMass;
+                if (reservedRecord == null)
+                    plan.SharedFacilityCapacityUsed += chunkMass;
+                else
+                {
+                    plan.ReservedLaunchCapacityByVehicle.TryGetValue(reservedRecord, out var existingUsed);
+                    plan.ReservedLaunchCapacityByVehicle[reservedRecord] = existingUsed + chunkMass;
+                }
+
+                remainingPayloadMass -= chunkMass;
+                remainingOptionCapacity -= chunkMass;
+                if (fuelType != null && fuelAmount > 0)
+                {
+                    fuelPlanned.TryGetValue(fuelType, out var existingFuel);
+                    fuelPlanned[fuelType] = existingFuel + fuelAmount;
+                }
+
+                if (!string.IsNullOrWhiteSpace(option.Label))
+                    plan.SupportLabels.Add(option.Label);
+            }
+
+            if (remainingPayloadMass <= 0.001)
+                break;
+        }
+
+        foreach (var kv in fuelPlanned)
+            plan.FuelByResource[kv.Key] = kv.Value;
+
+        return plan.PayloadAmount > 0.001;
+    }
+
     private static double GetRouteSurfaceLiftCapacityLeft(ObjectInfo providerOI, Company player,
         List<LaunchSupportOption> support, RouteLiftCapacityState capacityState)
     {
@@ -3191,19 +4794,56 @@ public static class LogisticsObserver
     {
         if (option == null)
             return false;
-        if (IsHumanResource(rd) && IsSharedFacilityLiftSupport(option) && !IsSpaceElevatorSupport(option))
+        if (IsHumanResource(rd) && !IsCrewSafeLaunchSupport(option))
             return false;
         return true;
     }
 
-    private static bool IsSharedFacilityLiftSupport(LaunchSupportOption option)
+    private static bool IsCrewSafeLaunchSupport(LaunchSupportOption option)
     {
-        return option != null && option.ReservedLaunchVehicle == null && IsVirtualSurfaceLiftSupport(option);
+        if (option == null)
+            return false;
+
+        var category = NormalizeLaunchSupportCategory(option.Category);
+        if (IsViolentCrewLaunchSupportCategory(category))
+            return false;
+
+        switch (category)
+        {
+            case "launch-pad":
+            case "space-elevator":
+            case "reserved-launch-vehicle":
+            case "standard-launch":
+                return true;
+            default:
+                return option.ReservedLaunchVehicle != null || !IsVirtualSurfaceLiftSupport(option);
+        }
+    }
+
+    private static bool IsViolentCrewLaunchSupportCategory(string category)
+    {
+        switch (NormalizeLaunchSupportCategory(category))
+        {
+            case "magnetic-launch-rails":
+            case "rotary-launcher":
+            case "electromagnetic-catapult":
+            case "stationary-mass-driver":
+                return true;
+            default:
+                return false;
+        }
     }
 
     private static bool IsSpaceElevatorSupport(LaunchSupportOption option)
     {
-        return string.Equals(option?.Category, "space-elevator", StringComparison.Ordinal);
+        return string.Equals(NormalizeLaunchSupportCategory(option?.Category), "space-elevator", StringComparison.Ordinal);
+    }
+
+    private static List<LaunchSupportOption> PreferSpaceElevatorLaunchSupport(List<LaunchSupportOption> support)
+    {
+        support ??= new List<LaunchSupportOption>();
+        var elevatorSupport = support.Where(IsSpaceElevatorSupport).ToList();
+        return elevatorSupport.Count > 0 ? elevatorSupport : support;
     }
 
     private static bool IsHumanResource(ResourceDefinition rd)
@@ -3516,6 +5156,7 @@ public static class LogisticsObserver
             return false;
         }
 
+        NotifyVanillaDeliveryObjectives(providerOI, requester, player, BuildSingleCargoManifest(rd, plan.PayloadAmount));
         return true;
     }
 
@@ -3536,6 +5177,86 @@ public static class LogisticsObserver
                 reason = $"Missing {removal.Resource.ID}: need {removal.Amount:0.#}, have {have:0.#}";
                 return false;
             }
+        }
+
+        return true;
+    }
+
+    private static bool ApplyVirtualLiftModuleChanges(ObjectInfo providerOI, ObjectInfo requester,
+        Company player, List<Data.GhostFlightModuleRecord> modules, VirtualLiftPlan plan)
+    {
+        var sourceData = providerOI?.GetObjectInfoData(player);
+        var targetData = requester?.GetObjectInfoData(player);
+        modules = modules?.Where(module => module != null && !string.IsNullOrWhiteSpace(module.moduleId)).ToList();
+        if (sourceData == null || targetData == null || player == null || modules == null || modules.Count == 0
+            || plan == null || plan.PayloadAmount <= 0.001)
+            return false;
+
+        var removals = plan.FuelByResource
+            .Where(kv => kv.Key != null && kv.Value > 0)
+            .ToDictionary(kv => kv.Key, kv => kv.Value);
+        foreach (var kv in removals)
+        {
+            if (sourceData.CheckResources(kv.Key) + 0.001 < kv.Value)
+            {
+                LogWarning($"ROUTE-LIFT modules abort: source={providerOI.ObjectName} target={requester.ObjectName} missing={kv.Key.ID} need={kv.Value:0.#} have={sourceData.CheckResources(kv.Key):0.#}");
+                return false;
+            }
+        }
+
+        var removed = new List<KeyValuePair<ResourceDefinition, double>>();
+        foreach (var kv in removals)
+        {
+            if (!sourceData.RemoveResource(kv.Key, kv.Value))
+            {
+                foreach (var rollback in removed)
+                    sourceData.AddResources(rollback.Key, rollback.Value);
+                LogWarning($"ROUTE-LIFT modules abort: remove fuel failed source={providerOI.ObjectName} rd={kv.Key.ID} amount={kv.Value:0.#}");
+                return false;
+            }
+            removed.Add(kv);
+        }
+
+        var cargoAll = CargoAll.CreateCargoEmpty();
+        if (cargoAll == null)
+        {
+            foreach (var rollback in removed)
+                sourceData.AddResources(rollback.Key, rollback.Value);
+            LogWarning($"ROUTE-LIFT modules abort: could not create module cargo target={requester.ObjectName}");
+            return false;
+        }
+
+        cargoAll.listCargo ??= new List<Cargo>();
+        foreach (var module in modules)
+        {
+            var descriptor = Data.LogisticsNetwork.ResolveSpaceModuleDescriptor(module.moduleId);
+            if (descriptor == null)
+            {
+                foreach (var rollback in removed)
+                    sourceData.AddResources(rollback.Key, rollback.Value);
+                LogWarning($"ROUTE-LIFT modules abort: missing module descriptor id={module.moduleId}");
+                return false;
+            }
+
+            var mass = Math.Max(0.0, module.mass > 0.001 ? module.mass : descriptor.GetMass(player));
+            cargoAll.listCargo.Add(new Cargo(cargoAll)
+            {
+                objectInfo = requester,
+                resourceTypeType = EResourceTypeType.modules,
+                moduleData = descriptor,
+                cargoMass = mass,
+                cargoMassPotencjal = mass,
+                crew = module.crew,
+                crewValue = module.crewValue
+            });
+        }
+
+        if (!targetData.AddResourcesAndModules(cargoAll, cancelationFly: false, cyclicalMission: false))
+        {
+            foreach (var rollback in removed)
+                sourceData.AddResources(rollback.Key, rollback.Value);
+            LogWarning($"ROUTE-LIFT modules abort: install failed target={requester.ObjectName}");
+            return false;
         }
 
         return true;
@@ -3568,7 +5289,21 @@ public static class LogisticsObserver
             return false;
         }
 
+        NotifyVanillaDeliveryObjectives(providerOI, requester, player, BuildSingleCargoManifest(rd, amount));
         return true;
+    }
+
+    private static IEnumerable<Data.GhostFlightCargoRecord> BuildSingleCargoManifest(ResourceDefinition rd, double amount)
+    {
+        if (rd == null || amount <= 0.001)
+            yield break;
+
+        yield return new Data.GhostFlightCargoRecord
+        {
+            resourceId = rd.ID,
+            cargoAmount = amount,
+            supplyConsumed = 0.0
+        };
     }
 
     private static string FormatVirtualLiftFuel(VirtualLiftPlan plan)
@@ -3815,10 +5550,9 @@ public static class LogisticsObserver
         {
             if (!TryGetBuiltEnabledLaunchSupportCategory(facility, out var category))
                 continue;
-            if (result.Any(option => string.Equals(
-                    NormalizeLaunchSupportCategory(option?.Category),
-                    category,
-                    StringComparison.Ordinal)))
+
+            ReplaceVehicleBackedLaunchSupportForBuiltFacility(result, facility, category);
+            if (HasBuiltFacilityLaunchSupport(result, category))
                 continue;
 
             var type = ResolveFacilityLaunchSupportType(facility, category);
@@ -3841,6 +5575,33 @@ public static class LogisticsObserver
         }
     }
 
+    private static void ReplaceVehicleBackedLaunchSupportForBuiltFacility(List<LaunchSupportOption> result,
+        Facility facility, string category)
+    {
+        if (result == null || facility == null || string.IsNullOrWhiteSpace(category))
+            return;
+
+        var normalized = NormalizeLaunchSupportCategory(category);
+        result.RemoveAll(option =>
+            option != null
+            && option.Vehicle != null
+            && ReferenceEquals(option.Facility, facility)
+            && string.Equals(NormalizeLaunchSupportCategory(option.Category), normalized, StringComparison.Ordinal));
+    }
+
+    private static bool HasBuiltFacilityLaunchSupport(List<LaunchSupportOption> result, string category)
+    {
+        if (result == null || string.IsNullOrWhiteSpace(category))
+            return false;
+
+        var normalized = NormalizeLaunchSupportCategory(category);
+        return result.Any(option =>
+            option != null
+            && option.Vehicle == null
+            && option.Facility != null
+            && string.Equals(NormalizeLaunchSupportCategory(option.Category), normalized, StringComparison.Ordinal));
+    }
+
     private static bool IsBuiltEnabledLaunchSupportFacility(Facility facility, string expectedCategory)
     {
         if (!TryGetBuiltEnabledLaunchSupportCategory(facility, out var category))
@@ -3859,8 +5620,17 @@ public static class LogisticsObserver
             return false;
 
         category = GetLaunchSupportCategory(facility.facilityDescriptor);
+        if (IsPassiveLaunchPadFacility(facility.facilityDescriptor, category))
+            return false;
         return IsFacilityLaunchSupportCategory(category)
             && IsLaunchSupportFacilityDescriptor(facility.facilityDescriptor, category);
+    }
+
+    private static bool IsPassiveLaunchPadFacility(FacilityBaseDescriptor descriptor, string category)
+    {
+        if (!string.Equals(NormalizeLaunchSupportCategory(category), "launch-pad", StringComparison.Ordinal))
+            return false;
+        return ResolveFakeLaunchSupportType(descriptor as GroundFacilityDescriptor) == null;
     }
 
     private static string GetLaunchSupportCategory(FacilityBaseDescriptor descriptor)

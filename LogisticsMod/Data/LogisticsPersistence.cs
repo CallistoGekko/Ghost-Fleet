@@ -65,6 +65,7 @@ public static class LogisticsPersistence
         public bool active;
         public bool collapsed;
         public List<SavedRouteResource> resources = new List<SavedRouteResource>();
+        public List<GhostFlightModuleRecord> pendingModules = new List<GhostFlightModuleRecord>();
         public List<string> disabledFacilityLaunchCategories = new List<string>();
         public List<SavedRouteSpacecraftFlightPlan> spacecraftFlightPlans = new List<SavedRouteSpacecraftFlightPlan>();
     }
@@ -156,6 +157,17 @@ public static class LogisticsPersistence
                         destinationObjectId = route.destinationObjectId,
                         active = route.isActive,
                         collapsed = route.uiCollapsed,
+                        pendingModules = (route.pendingModules ?? new List<GhostFlightModuleRecord>())
+                            .Where(module => module != null && !string.IsNullOrWhiteSpace(module.moduleId))
+                            .Select(module => new GhostFlightModuleRecord
+                            {
+                                moduleId = module.moduleId,
+                                displayName = module.displayName,
+                                mass = module.mass,
+                                crew = module.crew,
+                                crewValue = module.crewValue
+                            })
+                            .ToList(),
                         disabledFacilityLaunchCategories = (route.disabledFacilityLaunchCategories ?? new List<string>())
                             .Where(category => !string.IsNullOrWhiteSpace(category))
                             .Select(category => category.Trim())
@@ -285,6 +297,17 @@ public static class LogisticsPersistence
                                 .Where(category => !string.IsNullOrWhiteSpace(category))
                                 .Select(category => category.Trim())
                                 .Distinct(StringComparer.OrdinalIgnoreCase)
+                                .ToList(),
+                            pendingModules = (sr.pendingModules ?? new List<GhostFlightModuleRecord>())
+                                .Where(module => module != null && !string.IsNullOrWhiteSpace(module.moduleId))
+                                .Select(module => new GhostFlightModuleRecord
+                                {
+                                    moduleId = module.moduleId,
+                                    displayName = module.displayName,
+                                    mass = module.mass,
+                                    crew = module.crew,
+                                    crewValue = module.crewValue
+                                })
                                 .ToList(),
                             spacecraftFlightPlans = (sr.spacecraftFlightPlans ?? new List<SavedRouteSpacecraftFlightPlan>())
                                 .Where(plan => plan != null && !string.IsNullOrWhiteSpace(plan.shipTypeId))

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using CustomUpdate;
+using Data.ScriptableObject;
 using Game;
 using Game.Info;
 using Game.ObjectInfoDataScripts;
@@ -302,6 +303,138 @@ public static class LogisticsNetwork
         if (route?.resources == null || index < 0 || index >= route.resources.Count)
             return;
         route.resources.RemoveAt(index);
+    }
+
+    public static bool TryAddPendingRouteModule(LogisticsRouteRecord route, SpaceModule module, Company player,
+        out string reason)
+    {
+        return TryAddPendingRouteModule(route, module, player, 1, out _, out reason);
+    }
+
+    public static bool TryAddPendingRouteModule(LogisticsRouteRecord route, SpaceModule module, Company player,
+        int requestedCount, out int queuedCount, out string reason)
+    {
+        reason = null;
+        queuedCount = 0;
+        if (route == null || module == null || player == null)
+        {
+            reason = "Route module drop is unavailable";
+            return false;
+        }
+
+        var source = MonoBehaviourSingleton<ObjectInfoManager>.Instance?.GetByID(route.sourceObjectId);
+        if (source == null)
+        {
+            reason = "Route source is unavailable";
+            return false;
+        }
+
+        if (module.facilityDescriptor is not SpaceModuleDescriptor descriptor || !descriptor.CanBeLoadAsCargo)
+        {
+            reason = "Only cargo-capable modules can be dropped onto a route";
+            return false;
+        }
+
+        var available = source.GetAvailableModulesForCargo(player, null);
+        var availableCount = Math.Max(0, (int)module.CountSelectFromDropDown());
+        if (available == null || !available.Contains(module) || availableCount <= 0)
+        {
+            reason = "Module is not available at the route source";
+            return false;
+        }
+
+        queuedCount = Math.Min(Math.Max(1, requestedCount), availableCount);
+        module.Scrap(queuedCount, addResourceOnScrap: false);
+        route.pendingModules ??= new List<GhostFlightModuleRecord>();
+        for (var i = 0; i < queuedCount; i++)
+        {
+            route.pendingModules.Add(new GhostFlightModuleRecord
+            {
+                moduleId = descriptor.ID,
+                displayName = string.IsNullOrWhiteSpace(descriptor.Name) ? descriptor.ID : descriptor.Name,
+                mass = Math.Max(0.0, descriptor.GetMass(player)),
+                crew = false,
+                crewValue = 0
+            });
+        }
+        route.statusNote = null;
+        LogisticsObserver.Log($"ROUTE-MODULE queue: route={route.routeId} source={source.ObjectName} module={descriptor.ID} count={queuedCount}");
+        return true;
+    }
+
+    public static bool TryAddPendingRouteModule(LogisticsRouteRecord route, string moduleId, Company player,
+        int requestedCount, out int queuedCount, out string reason)
+    {
+        reason = null;
+        queuedCount = 0;
+        if (route == null || string.IsNullOrWhiteSpace(moduleId) || player == null)
+        {
+            reason = "Route module edit is unavailable";
+            return false;
+        }
+
+        var source = MonoBehaviourSingleton<ObjectInfoManager>.Instance?.GetByID(route.sourceObjectId);
+        if (source == null)
+        {
+            reason = "Route source is unavailable";
+            return false;
+        }
+
+        var descriptor = ResolveSpaceModuleDescriptor(moduleId);
+        if (descriptor == null || !descriptor.CanBeLoadAsCargo)
+        {
+            reason = "Only cargo-capable modules can be added to a route";
+            return false;
+        }
+
+        var module = source.GetAvailableModulesForCargo(player, null)
+            ?.Where(candidate => candidate?.facilityDescriptor is SpaceModuleDescriptor candidateDescriptor
+                && string.Equals(candidateDescriptor.ID, descriptor.ID, StringComparison.Ordinal)
+                && candidate.CountSelectFromDropDown() > 0)
+            .OrderByDescending(candidate => candidate.CountSelectFromDropDown())
+            .FirstOrDefault();
+        if (module == null)
+        {
+            reason = "No more matching modules are available at the route source";
+            return false;
+        }
+
+        return TryAddPendingRouteModule(route, module, player, requestedCount, out queuedCount, out reason);
+    }
+
+    public static bool TryReturnPendingRouteModule(LogisticsRouteRecord route, int index, Company player,
+        out string reason)
+    {
+        reason = null;
+        if (route?.pendingModules == null || index < 0 || index >= route.pendingModules.Count || player == null)
+        {
+            reason = "Pending module is unavailable";
+            return false;
+        }
+
+        var module = route.pendingModules[index];
+        var source = MonoBehaviourSingleton<ObjectInfoManager>.Instance?.GetByID(route.sourceObjectId);
+        var sourceData = source?.GetObjectInfoData(player);
+        var descriptor = ResolveSpaceModuleDescriptor(module?.moduleId);
+        if (source == null || sourceData == null || descriptor == null)
+        {
+            reason = "Could not return module to route source";
+            return false;
+        }
+
+        sourceData.AddSpaceModuleWithValidityCheck(descriptor);
+        route.pendingModules.RemoveAt(index);
+        route.statusNote = null;
+        LogisticsObserver.Log($"ROUTE-MODULE return: route={route.routeId} source={source.ObjectName} module={descriptor.ID}");
+        return true;
+    }
+
+    public static SpaceModuleDescriptor ResolveSpaceModuleDescriptor(string moduleId)
+    {
+        if (string.IsNullOrWhiteSpace(moduleId))
+            return null;
+        return SerializedMonoBehaviourSingleton<AllScriptableObjectManager>.Instance?.AllFacility
+            ?.GetByID(moduleId) as SpaceModuleDescriptor;
     }
 
     public static bool AssignGhostCraftToRoute(int routeId, GhostCraftRecord craft, out string reason)

@@ -4,38 +4,26 @@ using System.Collections.Generic;
 namespace LogisticsMod.Logic
 {
 
-internal enum LogisticsVanillaMissionPlanMode
+internal readonly struct LogisticsTransferEstimate
 {
-    Fastest,
-    Optimal
-}
-
-internal readonly struct LogisticsPorkchopCandidate
-{
-    public LogisticsPorkchopCandidate(int departureIndex, int arrivalIndex, double deltaV, DateTime arrival, bool scheduleAllowed = true)
+    public LogisticsTransferEstimate(double deltaV, double travelSeconds, double firstBurnDeltaV, double secondBurnDeltaV)
     {
-        DepartureIndex = departureIndex;
-        ArrivalIndex = arrivalIndex;
         DeltaV = deltaV;
-        Arrival = arrival;
-        ScheduleAllowed = scheduleAllowed;
+        TravelSeconds = travelSeconds;
+        FirstBurnDeltaV = firstBurnDeltaV;
+        SecondBurnDeltaV = secondBurnDeltaV;
     }
 
-    public int DepartureIndex { get; }
-    public int ArrivalIndex { get; }
     public double DeltaV { get; }
-    public DateTime Arrival { get; }
-    public bool ScheduleAllowed { get; }
+    public double TravelSeconds { get; }
+    public double TravelDays => TravelSeconds / 86400.0;
+    public double FirstBurnDeltaV { get; }
+    public double SecondBurnDeltaV { get; }
 }
 
 internal static class LogisticsVanillaMissionMath
 {
-    public static double GetPorkchopEffectiveDeltaV(bool solarPowered, double spacecraftTypeAvailableDeltaV)
-    {
-        return solarPowered
-            ? double.PositiveInfinity
-            : Math.Max(0.0, spacecraftTypeAvailableDeltaV);
-    }
+    private const double TwoPi = Math.PI * 2.0;
 
     public static double CalculateMassToFuel(double dryMassPerCraft, double cargoMass, int craftCount)
     {
@@ -93,59 +81,114 @@ internal static class LogisticsVanillaMissionMath
         return Math.Round((flightCost + leftOverFuel) * 10.0) / 10.0;
     }
 
-    public static bool IsBetterPorkchopCandidate(LogisticsVanillaMissionPlanMode mode, double candidateDeltaV,
-        DateTime candidateArrival, double bestDeltaV, DateTime bestArrival)
+    public static LogisticsTransferEstimate CalculateHohmannTransfer(double r1, double r2, double mu)
     {
-        if (!IsUsableDeltaV(candidateDeltaV))
-            return false;
-        if (bestDeltaV <= 0.001 || bestArrival == DateTime.MaxValue)
-            return true;
+        r1 = Math.Max(0.001, r1);
+        r2 = Math.Max(0.001, r2);
+        mu = Math.Max(0.001, mu);
 
-        if (mode == LogisticsVanillaMissionPlanMode.Optimal)
-        {
-            var deltaVDifference = candidateDeltaV - bestDeltaV;
-            if (Math.Abs(deltaVDifference) > 0.001)
-                return deltaVDifference < 0.0;
-            return candidateArrival < bestArrival;
-        }
-
-        if (candidateArrival != bestArrival)
-            return candidateArrival < bestArrival;
-        return candidateDeltaV < bestDeltaV;
+        var v1 = Math.Sqrt(mu / r1);
+        var v2 = Math.Sqrt(mu / r2);
+        var vt1 = Math.Sqrt(mu / r1 * (2.0 * r2 / (r1 + r2)));
+        var vt2 = Math.Sqrt(mu / r2 * (2.0 * r1 / (r1 + r2)));
+        var dv1 = Math.Abs(vt1 - v1);
+        var dv2 = Math.Abs(v2 - vt2);
+        var transferTime = Math.PI * Math.Sqrt(Math.Pow(r1 + r2, 3.0) / (8.0 * mu));
+        return new LogisticsTransferEstimate(dv1 + dv2, transferTime, dv1, dv2);
     }
 
-    public static bool TrySelectPorkchopCandidate(IEnumerable<LogisticsPorkchopCandidate> candidates,
-        LogisticsVanillaMissionPlanMode mode, double effectiveDeltaV, out LogisticsPorkchopCandidate selected)
+    public static LogisticsTransferEstimate CalculateBiEllipticTransfer(double r1, double r2, double rb, double mu)
     {
-        selected = default;
-        var bestDeltaV = 0.0;
-        var bestArrival = DateTime.MaxValue;
-        var found = false;
+        r1 = Math.Max(0.001, r1);
+        r2 = Math.Max(0.001, r2);
+        rb = Math.Max(Math.Max(r1, r2), rb);
+        mu = Math.Max(0.001, mu);
 
-        if (candidates == null)
-            return false;
-
-        foreach (var candidate in candidates)
-        {
-            if (!candidate.ScheduleAllowed || !IsUsableDeltaV(candidate.DeltaV))
-                continue;
-            if (candidate.DeltaV > effectiveDeltaV + 0.001)
-                continue;
-            if (!IsBetterPorkchopCandidate(mode, candidate.DeltaV, candidate.Arrival, bestDeltaV, bestArrival))
-                continue;
-
-            selected = candidate;
-            bestDeltaV = candidate.DeltaV;
-            bestArrival = candidate.Arrival;
-            found = true;
-        }
-
-        return found;
+        var v1 = Math.Sqrt(mu / r1);
+        var v2 = Math.Sqrt(mu / r2);
+        var vt1 = Math.Sqrt(mu / r1 * (2.0 * rb / (r1 + rb)));
+        var vt1a = Math.Sqrt(mu / rb * (2.0 * r1 / (r1 + rb)));
+        var vt2 = Math.Sqrt(mu / rb * (2.0 * r2 / (rb + r2)));
+        var vt2a = Math.Sqrt(mu / r2 * (2.0 * rb / (rb + r2)));
+        var dv1 = Math.Abs(vt1 - v1);
+        var dv2 = Math.Abs(vt2 - vt1a);
+        var dv3 = Math.Abs(v2 - vt2a);
+        var transferTime = Math.PI * Math.Sqrt(Math.Pow(r1 + rb, 3.0) / (8.0 * mu))
+                           + Math.PI * Math.Sqrt(Math.Pow(rb + r2, 3.0) / (8.0 * mu));
+        return new LogisticsTransferEstimate(dv1 + dv2 + dv3, transferTime, dv1, dv2 + dv3);
     }
 
-    private static bool IsUsableDeltaV(double deltaV)
+    public static double EstimateHighEnergyDeltaV(double baselineDeltaV, double baselineTravelDays,
+        double candidateTravelDays, double exponent = 1.55)
     {
-        return deltaV > 0.001 && !double.IsNaN(deltaV) && !double.IsInfinity(deltaV);
+        baselineDeltaV = Math.Max(0.0, baselineDeltaV);
+        baselineTravelDays = Math.Max(0.1, baselineTravelDays);
+        candidateTravelDays = Math.Max(0.1, candidateTravelDays);
+        if (candidateTravelDays >= baselineTravelDays)
+            return baselineDeltaV;
+
+        var compression = baselineTravelDays / candidateTravelDays;
+        var deltaV = baselineDeltaV * Math.Pow(compression, Math.Max(1.0, exponent));
+        if (double.IsNaN(deltaV) || double.IsInfinity(deltaV))
+            return baselineDeltaV;
+        return Math.Max(baselineDeltaV, deltaV);
+    }
+
+    public static double CalculateBadWindowChaseDeltaV(double targetOrbitRadiusMeters, double phaseMissRadians,
+        double candidateTravelDays)
+    {
+        targetOrbitRadiusMeters = Math.Max(0.0, targetOrbitRadiusMeters);
+        candidateTravelDays = Math.Max(0.0, candidateTravelDays);
+        if (targetOrbitRadiusMeters <= 0.001 || candidateTravelDays <= 0.001)
+            return 0.0;
+
+        var normalizedMiss = Math.Abs(phaseMissRadians % TwoPi);
+        if (normalizedMiss > Math.PI)
+            normalizedMiss = TwoPi - normalizedMiss;
+
+        var missDistanceMeters = targetOrbitRadiusMeters * 2.0 * Math.Sin(normalizedMiss / 2.0);
+        var travelSeconds = candidateTravelDays * 86400.0;
+        var chaseDeltaVMetersPerSecond = missDistanceMeters / travelSeconds;
+        if (double.IsNaN(chaseDeltaVMetersPerSecond) || double.IsInfinity(chaseDeltaVMetersPerSecond))
+            return 0.0;
+        return Math.Max(0.0, chaseDeltaVMetersPerSecond / 1000.0);
+    }
+
+    public static double CalculateMimaRequiredAcceleration(IReadOnlyList<double> dv1, IReadOnlyList<double> dv2,
+        double timeOfFlightSeconds)
+    {
+        if (dv1 == null || dv2 == null || dv1.Count < 3 || dv2.Count < 3 || timeOfFlightSeconds <= 0.001)
+            return 0.0;
+
+        var dvx = dv1[0] + dv2[0];
+        var dvy = dv1[1] + dv2[1];
+        var dvz = dv1[2] + dv2[2];
+        var diffX = -dv1[0] + dv2[0];
+        var diffY = -dv1[1] + dv2[1];
+        var diffZ = -dv1[2] + dv2[2];
+
+        var ab = dvx * diffX + dvy * diffY + dvz * diffZ;
+        var aa = dvx * dvx + dvy * dvy + dvz * dvz;
+        var bb = diffX * diffX + diffY * diffY + diffZ * diffZ;
+        var acceleration = Math.Sqrt(aa + 2.0 * bb + 2.0 * Math.Sqrt(ab * ab + bb * bb))
+                           / timeOfFlightSeconds;
+        if (double.IsNaN(acceleration) || double.IsInfinity(acceleration))
+            return 0.0;
+        return Math.Max(0.0, acceleration);
+    }
+
+    public static double CalculateMimaMaximumInitialMass(double requiredAcceleration, double timeOfFlightSeconds,
+        double maxThrust, double effectiveExhaustVelocity)
+    {
+        if (requiredAcceleration <= 0.0 || timeOfFlightSeconds <= 0.001
+            || maxThrust <= 0.0 || effectiveExhaustVelocity <= 0.001)
+            return 0.0;
+
+        var mass = 2.0 * maxThrust / requiredAcceleration
+                   / (1.0 + Math.Exp(-requiredAcceleration * timeOfFlightSeconds / effectiveExhaustVelocity));
+        if (double.IsNaN(mass) || double.IsInfinity(mass))
+            return 0.0;
+        return Math.Max(0.0, mass);
     }
 }
 }
