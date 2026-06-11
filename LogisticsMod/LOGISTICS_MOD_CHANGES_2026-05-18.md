@@ -224,3 +224,4 @@ This note summarizes the recent source-code changes made during the logistics ro
 - Allowed human-containing route manifests to dispatch once they are at least half full by mass, while ordinary cargo routes continue to prefer full or final-partial loads.
 - Kept plain Launch Pad facilities as passive launch-cost support unless vanilla exposes a fake launch vehicle for standalone route launch support.
 - Removed post-load route planning so opening an autosave or manual save restores logistics state without immediately creating new dispatches.
+- Fixed the alpha 3 BepInEx plugin-version metadata so the logistics plugin loads again and the object-info Logistics launcher appears.

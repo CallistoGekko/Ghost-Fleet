@@ -16,6 +16,13 @@
 - Do not call `SetAsLastSibling()` directly when opening or swapping the logistics popup. Use the logistics popup layer helper so the root moves immediately before the active `Current2` alert/trivia transform when one exists, and otherwise rises to the top of the normal UI stack.
 - Patch `UIManager.Open(...)` with a postfix that re-applies the logistics popup layer while it is open. This catches alerts opened after the logistics popup, so warning/confirmation blockers are not hidden behind the logistics panel.
 
+## Object Info Launcher
+
+- The object-info `Logistics` launcher should resolve the player-company `ObjectInfoData` from the selected `ObjectInfo`, not only trust the vanilla panel's currently displayed company toggle.
+- Parent the launcher to the visible object-info section host, set `LayoutElement.ignoreLayout = true`, and reapply `SetAsLastSibling()` after refresh/layout passes so large or shifted UI layouts do not hide it behind the window root or vanilla rebuilt children.
+- In the title chrome, keep the launcher visually subordinate to the object name and leave a clear fixed gap before the favorite/close controls; it should read as a utility action, not crowd the window commands.
+- Keep the `BepInPlugin` version string numeric, for example `0.4.2.4`; package versions may use `0.4.2-alpha.4`, but BepInEx skips the plugin if the attribute version is not parseable.
+
 ## Icon Sizing
 
 - Logistics UI should bound custom icons at the render site, not by editing source sprites or mod assets.

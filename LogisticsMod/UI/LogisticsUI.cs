@@ -147,6 +147,7 @@ public class LogisticsUI : MonoBehaviour
     private ObjectInfo _popupPinnedObjectInfo;
     private ObjectInfoWindow _objectInfoWindow;
     private RectTransform _parentRt;
+    private ObjectInfoCollapseSections _objectInfoCollapseSections;
     private bool _built;
     private bool _popupBuilt;
     private TMP_FontAsset _font;
@@ -157,6 +158,7 @@ public class LogisticsUI : MonoBehaviour
     private Sprite _styleCollapse;
     private float _sectionWidth = 560f;
     private GameObject _launcherButtonGo;
+    private RectTransform _launcherParentRt;
     private GameObject _popupRoot;
     private RectTransform _popupPanelRt;
     private RectTransform _popupContentRt;
@@ -1195,6 +1197,7 @@ public class LogisticsUI : MonoBehaviour
             var oics = _objectInfoWindow.GetComponent<ObjectInfoCollapseSections>();
             if (oics == null || oics.uiLists == null || oics.uiLists.Count == 0)
             { LogisticsObserver.LogError("No ObjectInfoCollapseSections"); return; }
+            _objectInfoCollapseSections = oics;
 
             var sectionParent = oics.uiLists[0].transform;
             var sectionRt = sectionParent as RectTransform;
@@ -1230,6 +1233,7 @@ public class LogisticsUI : MonoBehaviour
         ConsumeEscapeIfPopupOpen();
         TrySyncFromWindow(force: false);
         RefreshOpenRouteEditorOnTimeAdvance();
+        EnsureLauncherPlacement();
         UpdateLauncherVisibility();
     }
 
@@ -1246,20 +1250,19 @@ public class LogisticsUI : MonoBehaviour
         if (_launcherButtonGo != null)
             return;
 
-        var parent = transform as RectTransform;
+        var parent = ResolveLauncherParent();
         if (parent == null)
             return;
 
-        _launcherButtonGo = new GameObject("LogisticsPopupLauncher", typeof(RectTransform), typeof(Image), typeof(Button));
+        _launcherParentRt = parent;
+        _launcherButtonGo = new GameObject("LogisticsPopupLauncher", typeof(RectTransform), typeof(Image), typeof(Button), typeof(LayoutElement));
         _launcherButtonGo.transform.SetParent(parent, false);
-        _launcherButtonGo.transform.SetAsLastSibling();
 
         var rt = _launcherButtonGo.GetComponent<RectTransform>();
-        rt.anchorMin = new Vector2(1f, 1f);
-        rt.anchorMax = new Vector2(1f, 1f);
-        rt.pivot = new Vector2(1f, 1f);
-        rt.sizeDelta = new Vector2(116f, 30f);
-        rt.anchoredPosition = new Vector2(-14f, -42f);
+        PositionLauncher(rt);
+
+        var layout = _launcherButtonGo.GetComponent<LayoutElement>();
+        layout.ignoreLayout = true;
 
         _launcherButtonGo.GetComponent<Image>().color = WithAlpha(CardColor, 0.94f);
         var button = _launcherButtonGo.GetComponent<Button>();
@@ -1274,6 +1277,69 @@ public class LogisticsUI : MonoBehaviour
         label.rectTransform.offsetMax = new Vector2(-8f, -2f);
         AddButtonBorder(_launcherButtonGo, WithAlpha(TertiaryTextColor, 0.78f));
         ApplyButtonVisual(button, ButtonTone.Launcher);
+        EnsureLauncherPlacement();
+    }
+
+    private RectTransform ResolveLauncherParent()
+    {
+        if (_objectInfoCollapseSections == null && _objectInfoWindow != null)
+            _objectInfoCollapseSections = _objectInfoWindow.GetComponent<ObjectInfoCollapseSections>();
+
+        if (_objectInfoCollapseSections?.mainRectTransform != null)
+            return _objectInfoCollapseSections.mainRectTransform;
+
+        if (_objectInfoWindow?.objectName != null && _objectInfoWindow.objectName.transform.parent is RectTransform titleParent)
+            return titleParent;
+
+        return transform as RectTransform;
+    }
+
+    private void EnsureLauncherPlacement()
+    {
+        if (_launcherButtonGo == null)
+            return;
+
+        var parent = ResolveLauncherParent();
+        if (parent != null && parent != _launcherParentRt)
+        {
+            _launcherParentRt = parent;
+            _launcherButtonGo.transform.SetParent(parent, false);
+        }
+
+        PositionLauncher(_launcherButtonGo.GetComponent<RectTransform>());
+        _launcherButtonGo.transform.SetAsLastSibling();
+    }
+
+    private static void PositionLauncher(RectTransform rt)
+    {
+        if (rt == null)
+            return;
+
+        rt.anchorMin = new Vector2(1f, 1f);
+        rt.anchorMax = new Vector2(1f, 1f);
+        rt.pivot = new Vector2(1f, 1f);
+        rt.sizeDelta = new Vector2(104f, 24f);
+        rt.anchoredPosition = new Vector2(-84f, -8f);
+    }
+
+    private static ObjectInfoData ResolvePlayerData(ObjectInfo oi, Company player, ObjectInfoData fallback)
+    {
+        if (oi == null || player == null)
+            return null;
+
+        if (fallback != null && fallback.company == player)
+            return fallback;
+
+        try
+        {
+            var playerData = oi.GetObjectInfoData(player);
+            return playerData != null && playerData.company == player ? playerData : null;
+        }
+        catch (Exception ex)
+        {
+            LogisticsObserver.LogWarning($"Unable to resolve player logistics data for {oi.ObjectName}: {ex.GetType().Name}:{ex.Message}");
+            return null;
+        }
     }
 
     private void UpdateLauncherVisibility()
@@ -1282,7 +1348,7 @@ public class LogisticsUI : MonoBehaviour
             return;
 
         var player = MonoBehaviourSingleton<GameManager>.Instance?.Player;
-        var visible = _selectedData != null && _selectedObjectInfo != null && player != null && _selectedData.company == player;
+        var visible = _selectedData != null && _selectedObjectInfo != null && player != null;
         _launcherButtonGo.SetActive(visible);
     }
 
@@ -1754,8 +1820,9 @@ public class LogisticsUI : MonoBehaviour
     {
         var newOi = oid?.ObjectInfo;
         var player = MonoBehaviourSingleton<GameManager>.Instance?.Player;
-        var playerOwned = oid != null && newOi != null && player != null && oid.company == player;
-        _selectedData = playerOwned ? oid : null;
+        var playerData = ResolvePlayerData(newOi, player, oid);
+        var playerOwned = playerData != null;
+        _selectedData = playerData;
         _selectedObjectInfo = playerOwned ? newOi : null;
         UpdateLauncherVisibility();
 
@@ -1803,7 +1870,7 @@ public class LogisticsUI : MonoBehaviour
             }
         }
 
-        _currentData = oid;
+        _currentData = playerData;
         _currentObjectInfo = newOi;
         if (!_built) return;
         RefreshAllSections();
